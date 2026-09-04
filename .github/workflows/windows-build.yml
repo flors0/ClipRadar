@@ -47,8 +47,6 @@ jobs:
 
       - name: Capture UI preview
         shell: pwsh
-        env:
-          QT_QPA_PLATFORM: offscreen
         run: python scripts\capture_ui.py ui-preview.png
 
       - name: Build Windows application
