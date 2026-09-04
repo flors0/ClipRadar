@@ -26,12 +26,15 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
-      - name: Locate bundled media tools
+      - name: Install and bundle media tools
         shell: pwsh
         run: |
+          choco install ffmpeg -y --no-progress
           New-Item -ItemType Directory -Force -Path vendor\bin | Out-Null
-          $ffmpeg = (Get-Command ffmpeg).Source
-          $ffprobe = (Get-Command ffprobe).Source
+          $toolRoot = Join-Path $env:ChocolateyInstall "lib\ffmpeg\tools"
+          $ffmpeg = (Get-ChildItem $toolRoot -Filter ffmpeg.exe -Recurse | Select-Object -First 1).FullName
+          $ffprobe = (Get-ChildItem $toolRoot -Filter ffprobe.exe -Recurse | Select-Object -First 1).FullName
+          if (-not $ffmpeg -or -not $ffprobe) { throw "Chocolatey installed FFmpeg but its binaries were not found." }
           Copy-Item $ffmpeg vendor\bin\ffmpeg.exe
           Copy-Item $ffprobe vendor\bin\ffprobe.exe
 
