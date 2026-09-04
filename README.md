@@ -13,7 +13,7 @@ The first usable version deliberately stops at the review queue. Publishing is i
 - Establish a safe baseline when a channel is first added so old uploads are not analyzed without limit.
 - Check a bounded recent-upload window and apply a per-channel analysis delay.
 - Manually analyze the latest upload or a specific video.
-- Download source media and available German/English VTT captions with yt-dlp.
+- Download source media first, then fetch at most one available English VTT caption track as an optional best-effort enhancement.
 - Preselect candidate ranges locally using audio energy, transcript reactions, scene changes, and YouTube heatmap data when available.
 - Send only compressed candidate previews to the selected Gemini model.
 - Apply hard daily limits for videos, source minutes, clips, and estimated AI cost.
@@ -68,4 +68,3 @@ ClipRadar keeps its database, downloads, candidate previews, logs, and output in
 ## Architecture
 
 The code is split by responsibility under `src/clipradar/`: `channels`, `monitoring`, `jobs`, `youtube`, `media`, `analysis`, `ai`, `rendering`, `review`, `settings`, `storage`, and `ui`. Network, Gemini, download, detection, and rendering operations run in a background executor; Qt's UI thread only coordinates and displays state.
-

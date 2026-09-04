@@ -191,10 +191,6 @@ class YouTubeClient:
             "outtmpl": out_template,
             "noplaylist": True,
             "continuedl": True,
-            "writesubtitles": True,
-            "writeautomaticsub": True,
-            "subtitleslangs": ["en", "de", "en.*", "de.*"],
-            "subtitlesformat": "vtt",
             "writeinfojson": True,
             "ffmpeg_location": str(Path(bundled_binary("ffmpeg")).parent),
         }
@@ -208,7 +204,10 @@ class YouTubeClient:
         if not video_files:
             raise YouTubeError("yt-dlp finished without a usable video file.")
         video_path = max(video_files, key=lambda path: path.stat().st_size)
-        transcripts = sorted(target_dir.glob(f"{video.video_id}*.vtt"), key=lambda path: ("de" not in path.name, len(path.name)))
+        transcripts = self._english_transcripts(target_dir, video.video_id)
+        if not transcripts:
+            self._download_captions_best_effort(video, info, out_template)
+            transcripts = self._english_transcripts(target_dir, video.video_id)
         info_path = next(iter(target_dir.glob(f"{video.video_id}*.info.json")), None)
         return DownloadedMedia(
             video_path=video_path,
@@ -216,6 +215,53 @@ class YouTubeClient:
             info_path=info_path,
             duration_seconds=float(info.get("duration") or video.duration_seconds or 0),
         )
+
+    def _download_captions_best_effort(
+        self,
+        video: RemoteVideo,
+        info: dict[str, Any],
+        out_template: str,
+    ) -> None:
+        languages = self._preferred_caption_languages(info)
+        if not languages:
+            return
+        options = self._quiet_options() | {
+            "skip_download": True,
+            "outtmpl": out_template,
+            "noplaylist": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": languages,
+            "subtitlesformat": "vtt",
+            "ffmpeg_location": str(Path(bundled_binary("ffmpeg")).parent),
+        }
+        try:
+            with self._ydl(options) as ydl:
+                ydl.extract_info(video.url, download=True)
+        except Exception:
+            # Captions improve local candidate selection, but a rate-limited or
+            # unavailable subtitle track must never discard a valid source video.
+            logger.warning("Captions for %s are unavailable; continuing with audio and visual signals.", video.video_id)
+
+    @staticmethod
+    def _preferred_caption_languages(info: dict[str, Any]) -> list[str]:
+        available: list[str] = []
+        for source in (info.get("subtitles") or {}, info.get("automatic_captions") or {}):
+            for language in source:
+                if language not in available:
+                    available.append(str(language))
+        for candidate in ("en", "en-orig"):
+            if candidate in available:
+                return [candidate]
+        regional = next((language for language in available if language.startswith("en-")), None)
+        if regional:
+            return [regional]
+        return []
+
+    @staticmethod
+    def _english_transcripts(target_dir: Path, video_id: str) -> list[Path]:
+        pattern = re.compile(r"\.en(?:[-_][^.]*)*\.vtt$", re.IGNORECASE)
+        return sorted(path for path in target_dir.glob(f"{video_id}*.vtt") if pattern.search(path.name))
 
     @staticmethod
     def load_heatmap(info_path: Path | None) -> list[dict[str, float]]:
@@ -227,4 +273,3 @@ class YouTubeClient:
         except (OSError, json.JSONDecodeError):
             logger.warning("Could not read cached YouTube metadata from %s", info_path.name)
             return []
-
