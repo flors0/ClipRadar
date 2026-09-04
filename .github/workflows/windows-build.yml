@@ -45,6 +45,12 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
 
+      - name: Capture UI preview
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python scripts\capture_ui.py ui-preview.png
+
       - name: Build Windows application
         shell: pwsh
         run: |
@@ -54,8 +60,8 @@ jobs:
       - name: Test packaged EXE
         shell: pwsh
         run: |
-          & .\dist\ClipRadar\ClipRadar.exe --self-test
-          if ($LASTEXITCODE -ne 0) { throw "Packaged EXE self-test failed with code $LASTEXITCODE" }
+          $process = Start-Process -FilePath ".\dist\ClipRadar\ClipRadar.exe" -ArgumentList "--self-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Packaged EXE self-test failed with code $($process.ExitCode)" }
 
       - name: Package application
         shell: pwsh
@@ -66,5 +72,13 @@ jobs:
         with:
           name: ClipRadar-Windows-x64
           path: ClipRadar-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload UI preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipRadar-UI-preview
+          path: ui-preview.png
           if-no-files-found: error
           retention-days: 30

@@ -21,8 +21,8 @@ $env:QT_QPA_PLATFORM = "offscreen"
 python -m pytest -q
 python scripts\generate_icon.py
 python -m PyInstaller --noconfirm --clean clipradar.spec
-& ".\dist\ClipRadar\ClipRadar.exe" --self-test
-if ($LASTEXITCODE -ne 0) { throw "Packaged ClipRadar self-test failed." }
+$process = Start-Process -FilePath ".\dist\ClipRadar\ClipRadar.exe" -ArgumentList "--self-test" -Wait -PassThru
+if ($process.ExitCode -ne 0) { throw "Packaged ClipRadar self-test failed with code $($process.ExitCode)." }
 
 $Archive = Join-Path $ProjectRoot "dist\ClipRadar-Windows-x64.zip"
 if (Test-Path $Archive) { Remove-Item $Archive -Force }
