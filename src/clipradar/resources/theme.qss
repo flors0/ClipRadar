@@ -1,5 +1,4 @@
 * {
-    font-family: "Segoe UI", "Inter", sans-serif;
     font-size: 13px;
     color: #f2f5f3;
 }
@@ -83,4 +82,3 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QProgressBar { height: 5px; border: none; border-radius: 2px; background: #242a27; text-align: center; color: transparent; }
 QProgressBar::chunk { background: #caff00; border-radius: 2px; }
 QToolTip { color: #ffffff; background: #171c19; border: 1px solid #343d37; padding: 6px; }
-
