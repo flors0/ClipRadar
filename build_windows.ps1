@@ -4,6 +4,7 @@ Set-Location $ProjectRoot
 
 python -m pip install --upgrade pip
 python -m pip install -r requirements-dev.txt
+python -m pip install -e .
 
 $VendorBin = Join-Path $ProjectRoot "vendor\bin"
 New-Item -ItemType Directory -Force -Path $VendorBin | Out-Null
