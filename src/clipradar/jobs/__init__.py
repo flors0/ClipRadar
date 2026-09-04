@@ -1,0 +1,1 @@
+"""Persistent analysis job pipeline."""

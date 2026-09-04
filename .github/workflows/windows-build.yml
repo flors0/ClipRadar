@@ -1,0 +1,66 @@
+name: Windows build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test-and-build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-dev.txt
+
+      - name: Locate bundled media tools
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path vendor\bin | Out-Null
+          $ffmpeg = (Get-Command ffmpeg).Source
+          $ffprobe = (Get-Command ffprobe).Source
+          Copy-Item $ffmpeg vendor\bin\ffmpeg.exe
+          Copy-Item $ffprobe vendor\bin\ffprobe.exe
+
+      - name: Run real core and UI tests
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -m pytest -q
+
+      - name: Build Windows application
+        shell: pwsh
+        run: |
+          python scripts\generate_icon.py
+          python -m PyInstaller --noconfirm --clean clipradar.spec
+
+      - name: Test packaged EXE
+        shell: pwsh
+        run: |
+          & .\dist\ClipRadar\ClipRadar.exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "Packaged EXE self-test failed with code $LASTEXITCODE" }
+
+      - name: Package application
+        shell: pwsh
+        run: Compress-Archive -Path .\dist\ClipRadar\* -DestinationPath .\ClipRadar-Windows-x64.zip -CompressionLevel Optimal
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipRadar-Windows-x64
+          path: ClipRadar-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30

@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clipradar"
+version = "0.1.0"
+description = "Local-first YouTube clip discovery, rendering, and review workflow"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "PySide6>=6.8,<7",
+  "google-genai>=1.0,<3",
+  "keyring>=25,<27",
+  "opencv-python-headless>=4.10,<6",
+  "platformdirs>=4.3,<5",
+  "pydantic>=2.10,<3",
+  "socksio>=1,<2",
+  "yt-dlp>=2025.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "Pillow>=11,<13",
+  "pytest>=8.3,<10",
+  "pytest-qt>=4.4,<5",
+  "pyinstaller>=6.11,<7",
+]
+
+[project.scripts]
+clipradar = "clipradar.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+clipradar = ["resources/*.svg", "resources/*.qss"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+qt_api = "pyside6"

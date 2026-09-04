@@ -1,0 +1,287 @@
+from __future__ import annotations
+
+from collections.abc import Callable
+
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QCloseEvent, QIcon
+from PySide6.QtWidgets import (
+    QButtonGroup,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from clipradar.app.coordinator import BackgroundCoordinator
+from clipradar.app.paths import resource_path
+from clipradar.app.services import AppServices
+from clipradar.ui.common import muted_label
+from clipradar.ui.pages.channels import ChannelsPage
+from clipradar.ui.pages.dashboard import DashboardPage
+from clipradar.ui.pages.review import ReviewPage
+from clipradar.ui.pages.settings import SettingsPage
+
+
+PAGE_INFO = [
+    ("Dashboard", "A quiet overview of monitoring, processing, and review."),
+    ("Channels", "Choose sources and trigger focused analysis."),
+    ("Review", "Watch each finished clip and make one clear decision."),
+    ("Settings", "Control defaults, AI access, budget, and storage."),
+]
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, services: AppServices, *, start_background: bool = True):
+        super().__init__()
+        self.services = services
+        self.coordinator = BackgroundCoordinator(services, self)
+        self.setWindowTitle("ClipRadar")
+        self.setWindowIcon(QIcon(str(resource_path("resources/logo.svg"))))
+        self.resize(1440, 900)
+        self.setMinimumSize(1100, 720)
+        self._build_ui()
+        self._connect()
+        self.refresh_all()
+        if start_background:
+            self.coordinator.start()
+
+    def _build_ui(self) -> None:
+        root = QWidget()
+        root.setObjectName("AppRoot")
+        self.setCentralWidget(root)
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(214)
+        side = QVBoxLayout(sidebar)
+        side.setContentsMargins(20, 24, 20, 20)
+        side.setSpacing(8)
+        brand_row = QHBoxLayout()
+        logo = QLabel()
+        logo.setPixmap(QIcon(str(resource_path("resources/logo.svg"))).pixmap(36, 36))
+        brand = QLabel("ClipRadar")
+        brand.setObjectName("Brand")
+        brand_row.addWidget(logo)
+        brand_row.addSpacing(4)
+        brand_row.addWidget(brand)
+        brand_row.addStretch(1)
+        side.addLayout(brand_row)
+        tagline = muted_label("Find the moments worth keeping.", wrap=True)
+        side.addWidget(tagline)
+        side.addSpacing(24)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
+        self.nav_buttons: list[QPushButton] = []
+        icons = ["⌂", "◉", "▶", "⚙"]
+        for index, ((title, _), icon) in enumerate(zip(PAGE_INFO, icons, strict=True)):
+            button = QPushButton(f"{icon}    {title}")
+            button.setObjectName("NavButton")
+            button.setCheckable(True)
+            button.clicked.connect(lambda _checked=False, page=index: self._set_page(page))
+            self.nav_group.addButton(button, index)
+            self.nav_buttons.append(button)
+            side.addWidget(button)
+        side.addStretch(1)
+        self.sidebar_status = muted_label("●  Ready")
+        side.addWidget(self.sidebar_status)
+        version = QLabel("v0.1.0")
+        version.setObjectName("Tiny")
+        side.addWidget(version)
+        shell.addWidget(sidebar)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(30, 24, 30, 28)
+        content_layout.setSpacing(18)
+        header = QHBoxLayout()
+        heading = QVBoxLayout()
+        heading.setSpacing(3)
+        self.page_title = QLabel()
+        self.page_title.setObjectName("PageTitle")
+        self.page_subtitle = muted_label("")
+        heading.addWidget(self.page_title)
+        heading.addWidget(self.page_subtitle)
+        header.addLayout(heading)
+        header.addStretch(1)
+        self.pipeline_text = muted_label("No active job")
+        header.addWidget(self.pipeline_text)
+        content_layout.addLayout(header)
+        self.pipeline_progress = QProgressBar()
+        self.pipeline_progress.setRange(0, 1000)
+        self.pipeline_progress.setValue(0)
+        self.pipeline_progress.hide()
+        content_layout.addWidget(self.pipeline_progress)
+
+        self.pages = QStackedWidget()
+        self.dashboard = DashboardPage(self.services.repositories)
+        self.channels = ChannelsPage(self.services.repositories.channels)
+        self.review = ReviewPage(self.services.repositories.clips)
+        self.settings = SettingsPage(self.services.settings, self.services.paths)
+        for page in (self.dashboard, self.channels, self.review, self.settings):
+            self.pages.addWidget(page)
+        content_layout.addWidget(self.pages, 1)
+
+        self.toast = QFrame(content)
+        self.toast.setObjectName("Toast")
+        toast_layout = QHBoxLayout(self.toast)
+        toast_layout.setContentsMargins(14, 9, 14, 9)
+        self.toast_label = QLabel()
+        toast_layout.addWidget(self.toast_label)
+        self.toast.hide()
+        content_layout.addWidget(self.toast)
+        shell.addWidget(content, 1)
+        self.nav_buttons[0].setChecked(True)
+        self._set_page(0)
+
+    def _connect(self) -> None:
+        self.dashboard.check_requested.connect(self._check_channels)
+        self.channels.add_requested.connect(self._add_channel)
+        self.channels.toggle_requested.connect(
+            lambda channel_id, enabled: self._background(
+                f"toggle:{channel_id}", lambda: self.services.channels.set_monitoring(channel_id, enabled)
+            )
+        )
+        self.channels.latest_requested.connect(
+            lambda channel_id: self._background(
+                f"latest:{channel_id}", lambda: self.services.channels.analyze_latest(channel_id)
+            )
+        )
+        self.channels.specific_requested.connect(
+            lambda channel_id, url: self._background(
+                f"specific:{channel_id}", lambda: self.services.channels.analyze_specific(channel_id, url)
+            )
+        )
+        self.channels.remove_requested.connect(
+            lambda channel_id: self._background(
+                f"remove:{channel_id}", lambda: self.services.channels.remove_channel(channel_id)
+            )
+        )
+        self.channels.update_requested.connect(self._update_channel)
+        self.review.approve_requested.connect(self._approve)
+        self.review.reject_requested.connect(self._reject)
+        self.review.regenerate_requested.connect(self._regenerate)
+        self.settings.saved.connect(self._toast)
+        self.settings.failed.connect(lambda message: self._toast(message, error=True))
+        self.settings.test_ai_requested.connect(self._test_ai)
+        self.coordinator.task_succeeded.connect(self._task_succeeded)
+        self.coordinator.task_failed.connect(self._task_failed)
+        self.coordinator.data_changed.connect(self.refresh_all)
+        self.coordinator.job_progress.connect(self._job_progress)
+
+    def refresh_all(self) -> None:
+        self.dashboard.refresh()
+        self.channels.refresh()
+        self.review.refresh()
+
+    def _set_page(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        title, subtitle = PAGE_INFO[index]
+        self.page_title.setText(title)
+        self.page_subtitle.setText(subtitle)
+        self.nav_buttons[index].setChecked(True)
+        if index == 2:
+            self.review.refresh()
+
+    def _background(self, key: str, operation: Callable[[], object]) -> None:
+        if not self.coordinator.execute(key, operation):
+            self._toast("That task is already running.", error=True)
+
+    def _check_channels(self) -> None:
+        self.dashboard.set_monitoring_busy(True)
+        self.coordinator.check_channels()
+
+    def _add_channel(self, identifier: str) -> None:
+        self._background("add_channel", lambda: self.services.channels.add_channel(identifier))
+
+    def _update_channel(self, channel_id: int, changes: dict) -> None:
+        try:
+            self.services.repositories.channels.update(channel_id, **changes)
+            self.refresh_all()
+            self._toast("Channel settings saved")
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+
+    def _approve(self, clip_id: int) -> None:
+        try:
+            self.services.review.approve(clip_id)
+            self.refresh_all()
+            self._toast("Clip approved")
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+
+    def _reject(self, clip_id: int) -> None:
+        try:
+            self.services.review.reject(clip_id)
+            self.refresh_all()
+            self._toast("Clip rejected")
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+
+    def _regenerate(self, clip_id: int) -> None:
+        if self.coordinator.regenerate(clip_id):
+            self._toast("Regenerating clip…")
+
+    def _test_ai(self, key: str, model: str) -> None:
+        self._background("ai_test", lambda: self.services.gemini.test_connection(key, model))
+
+    def _task_succeeded(self, key: str, result: object) -> None:
+        if key == "monitoring":
+            self.dashboard.set_monitoring_busy(False)
+            discovered = getattr(result, "videos_discovered", 0)
+            self._toast(f"Channel check complete · {discovered} new video{'s' if discovered != 1 else ''}")
+        elif key == "add_channel":
+            self.channels.finish_add(True)
+            self._toast(f"Added {getattr(result, 'name', 'channel')}")
+        elif key == "ai_test":
+            self.settings.set_connection_status(str(result), True)
+        elif key == "pipeline":
+            self.pipeline_progress.hide()
+            self.pipeline_text.setText("No active job")
+            self.sidebar_status.setText("●  Ready")
+            self._toast(f"Analysis complete · {result} clip{'s' if result != 1 else ''} ready")
+        elif key.startswith("regenerate:"):
+            self._toast("New render ready for review")
+        elif key.startswith(("latest:", "specific:")):
+            self._toast("Analysis queued")
+        else:
+            self._toast("Saved")
+        self.refresh_all()
+
+    def _task_failed(self, key: str, message: str) -> None:
+        if key == "monitoring":
+            self.dashboard.set_monitoring_busy(False)
+        elif key == "add_channel":
+            self.channels.finish_add(False)
+        elif key == "ai_test":
+            self.settings.set_connection_status(message, False)
+            return
+        elif key == "pipeline":
+            self.pipeline_progress.hide()
+            self.pipeline_text.setText("Last job failed")
+            self.sidebar_status.setText("●  Attention needed")
+        self._toast(message, error=True)
+        self.refresh_all()
+
+    def _job_progress(self, stage: str, value: float) -> None:
+        self.pipeline_progress.show()
+        self.pipeline_progress.setValue(round(value * 1000))
+        self.pipeline_text.setText(stage)
+        self.sidebar_status.setText("●  Processing")
+
+    def _toast(self, message: str, error: bool = False) -> None:
+        self.toast_label.setText(message)
+        self.toast_label.setStyleSheet("color:#ff8080" if error else "color:#f2f5f3")
+        self.toast.show()
+        QTimer.singleShot(5000, self.toast.hide)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        self.coordinator.stop()
+        super().closeEvent(event)
