@@ -18,10 +18,12 @@ from clipradar.models import (
     Channel,
     ClipCandidate,
     ClipStatus,
+    JobStatus,
     PublishJob,
     RenderedClip,
     SourceVideo,
     YouTubeAccount,
+    utc_now,
 )
 from clipradar.settings.secrets import MemorySecretStore
 from clipradar.ui.main_window import MainWindow
@@ -131,6 +133,18 @@ def main() -> int:
             notify_subscribers=False,
             scheduled_for="2026-09-06T16:30:00+00:00",
         ))
+        demo_job = services.repositories.jobs.create(int(source.id), utc_now(), manual=True)
+        services.repositories.jobs.update(
+            demo_job.id, JobStatus.ANALYZING, "Gemini ranking candidate 1/2", 0.46,
+            increment_attempts=True,
+        )
+        services.repositories.activity.add("Analysis attempt 1 started", "info", demo_job.id)
+        services.repositories.activity.add(
+            "Local analysis found 2 candidates · model gemini-3.8-flash", "info", demo_job.id
+        )
+        services.repositories.activity.add(
+            "Candidate 1/2 scored 93/100 · selected for rendering", "success", demo_job.id
+        )
         services.repositories.activity.add("Monitoring started")
         services.repositories.activity.add("Added channel Creator Channel", "success")
         window = MainWindow(services, start_background=False)

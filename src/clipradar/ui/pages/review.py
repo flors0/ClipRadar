@@ -62,7 +62,11 @@ class ReviewItemWidget(QWidget):
         title.setWordWrap(True)
         title.setMaximumHeight(42)
         layout.addWidget(title)
-        layout.addWidget(muted_label(f"{format_time(clip['duration_seconds'])}  ·  {clip['format']}"))
+        footer = muted_label(f"{format_time(clip['duration_seconds'])}  ·  {clip['format']}")
+        if not Path(clip["file_path"]).is_file():
+            footer.setText(f"{footer.text()}  ·  File missing")
+            footer.setStyleSheet("color:#ff7070")
+        layout.addWidget(footer)
 
 
 class PublishDialog(QDialog):
@@ -176,6 +180,7 @@ class PublishDialog(QDialog):
 class ReviewPage(QWidget):
     approve_requested = Signal(int)
     reject_requested = Signal(int)
+    delete_requested = Signal(int)
     regenerate_requested = Signal(int, str)
     publish_requested = Signal(int, dict)
 
@@ -212,7 +217,9 @@ class ReviewPage(QWidget):
         self.list = QListWidget()
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.setSpacing(8)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.currentRowChanged.connect(self._select)
+        self.list.customContextMenuRequested.connect(self._show_context_menu)
         left_layout.addWidget(self.list, 1)
         splitter.addWidget(left)
 
@@ -282,6 +289,8 @@ class ReviewPage(QWidget):
         more_menu = QMenu(self.more)
         self.open_source = more_menu.addAction("Open source")
         self.open_file = more_menu.addAction("Open file location")
+        more_menu.addSeparator()
+        self.delete_clip = more_menu.addAction("Delete clip permanently…")
         self.more.setMenu(more_menu)
         self.approve = QPushButton("Approve only")
         self.publish = QPushButton("Publish…")
@@ -291,6 +300,7 @@ class ReviewPage(QWidget):
         self.publish.clicked.connect(self._publish)
         self.open_file.triggered.connect(self._open_file)
         self.open_source.triggered.connect(self._open_source)
+        self.delete_clip.triggered.connect(self._confirm_delete)
 
         actions = QHBoxLayout()
         actions.addWidget(self.reject)
@@ -302,7 +312,7 @@ class ReviewPage(QWidget):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 7)
-        self._set_actions(False)
+        self._set_actions(False, False)
 
     def refresh(self) -> None:
         current_id = self.current["id"] if self.current else None
@@ -312,9 +322,10 @@ class ReviewPage(QWidget):
         selected_row = -1
         for index, clip in enumerate(self.records):
             item = QListWidgetItem()
-            item.setSizeHint(ReviewItemWidget(clip).sizeHint())
+            item_widget = ReviewItemWidget(clip)
+            item.setSizeHint(item_widget.sizeHint())
             self.list.addItem(item)
-            self.list.setItemWidget(item, ReviewItemWidget(clip))
+            self.list.setItemWidget(item, item_widget)
             if clip["id"] == current_id:
                 selected_row = index
         self.list.blockSignals(False)
@@ -326,28 +337,35 @@ class ReviewPage(QWidget):
             self.current = None
             self.player.stop()
             self.player.setSource(QUrl())
-            self.status.setText("  ●  Queue empty  ")
+            self._set_status("Queue empty", "#8e9993")
             self.detail_title.setText("Nothing waiting for review")
             self.detail_reason.setText("Rendered clips will appear here automatically.")
             self.timestamp.setText("Timestamp —")
             self.clip_duration.setText("Duration —")
             self.metadata_status.setText("Metadata —")
-            self._set_actions(False)
+            self._set_actions(False, False)
 
     def _select(self, row: int) -> None:
         if row < 0 or row >= len(self.records):
             return
         self.current = self.records[row]
         path = Path(self.current["file_path"])
+        has_file = path.is_file()
         self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(str(path.resolve())))
+        self.player.setSource(QUrl.fromLocalFile(str(path.resolve())) if has_file else QUrl())
         self.detail_title.setText(self.current["ai_title"] or self.current["video_title"])
-        self.detail_reason.setText(self.current["ai_reason"] or "Gemini did not provide a reason.")
+        reason = self.current["ai_reason"] or "Gemini did not provide a reason."
+        if not has_file:
+            reason = f"The rendered file was removed outside ClipRadar. You can reject or permanently delete this entry.\n\n{reason}"
+        self.detail_reason.setText(reason)
         start = self.current["refined_start_seconds"] or self.current["start_seconds"]
         end = self.current["refined_end_seconds"] or self.current["end_seconds"]
         self.timestamp.setText(f"Source {format_time(start)} → {format_time(end)}")
         self.clip_duration.setText(f"Clip {format_time(self.current['duration_seconds'])}")
-        self.status.setText(f"  ●  {round(self.current['ai_score'] or 0)}/100  ")
+        self._set_status(
+            "File missing" if not has_file else f"{round(self.current['ai_score'] or 0)}/100",
+            "#ff7070" if not has_file else "#caff00",
+        )
         mode_index = self.reframe.findData(self.current.get("reframe_mode") or "auto")
         self.reframe.setCurrentIndex(mode_index if mode_index >= 0 else 0)
         generated = bool(
@@ -356,23 +374,29 @@ class ReviewPage(QWidget):
             or self.current["ai_tags_json"] != "[]"
         )
         self.metadata_status.setText("Gemini metadata ready" if generated else "Metadata needs review")
-        self._set_actions(path.exists())
+        self._set_actions(True, has_file)
 
-    def _set_actions(self, enabled: bool) -> None:
-        for button in (
-            self.reject,
-            self.regenerate,
-            self.more,
-            self.open_file,
-            self.open_source,
-            self.approve,
-            self.play,
-        ):
-            button.setEnabled(enabled)
+    def _set_actions(self, has_record: bool, has_file: bool) -> None:
+        regenerating = bool(self.current and self.current.get("status") == "Regenerating")
+        can_decide = has_record and not regenerating
+        self.reject.setEnabled(can_decide)
+        self.more.setEnabled(has_record)
+        self.open_source.setEnabled(has_record)
+        self.open_file.setEnabled(has_file)
+        self.delete_clip.setEnabled(can_decide)
+        for button in (self.regenerate, self.approve, self.play):
+            button.setEnabled(can_decide and has_file)
         has_account = bool(self.publishing.repos.youtube_accounts.list_all())
-        self.publish.setEnabled(enabled and has_account)
+        self.publish.setEnabled(can_decide and has_file and has_account)
         self.publish.setToolTip("" if has_account else "Connect YouTube under Settings → Publishing first")
-        self.reframe.setEnabled(enabled)
+        self.reframe.setEnabled(can_decide and has_file)
+
+    def _set_status(self, text: str, color: str) -> None:
+        self.status.setText(f"  ●  {text}  ")
+        self.status.setStyleSheet(
+            f"color:{color}; background:#111612; border:1px solid #2a322d; "
+            "border-radius:11px; padding:3px 7px;"
+        )
 
     def _emit(self, signal: Signal) -> None:
         if self.current:
@@ -383,6 +407,39 @@ class ReviewPage(QWidget):
         if self.current:
             self.player.pause()
             self.regenerate_requested.emit(int(self.current["id"]), str(self.reframe.currentData()))
+
+    def _show_context_menu(self, point) -> None:
+        item = self.list.itemAt(point)
+        if item is None:
+            return
+        self.list.setCurrentItem(item)
+        menu = QMenu(self.list)
+        action = menu.addAction("Delete clip permanently…")
+        action.setEnabled(bool(self.current and self.current.get("status") != "Regenerating"))
+        action.triggered.connect(self._confirm_delete)
+        menu.exec(self.list.viewport().mapToGlobal(point))
+
+    def _confirm_delete(self) -> None:
+        if not self.current:
+            return
+        path = Path(self.current["file_path"])
+        file_note = (
+            "The local MP4 file will also be deleted."
+            if path.is_file()
+            else "The local file is already missing; its queue record will be removed."
+        )
+        answer = QMessageBox.warning(
+            self,
+            "Permanently delete clip?",
+            f"{file_note}\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            clip_id = int(self.current["id"])
+            self.player.stop()
+            self.player.setSource(QUrl())
+            self.delete_requested.emit(clip_id)
 
     def _publish(self) -> None:
         if not self.current:

@@ -6,7 +6,7 @@ import sqlite3
 
 from clipradar.app.logging_setup import RedactingFilter
 from clipradar.models import Channel
-from clipradar.settings.models import AISettings, ClipSettings
+from clipradar.settings.models import AISettings, BudgetSettings, ClipSettings
 from clipradar.storage.database import Database
 
 
@@ -104,3 +104,14 @@ def test_logging_filter_redacts_google_tokens():
     message = record.getMessage()
     assert "abcdefghijklmnopqrstuvwxyz" not in message
     assert "[redacted]" in message
+
+
+def test_budget_failure_explains_used_requested_and_configured_minutes(services):
+    services.repositories.usage.add(source_minutes=240)
+    decision = services.pipeline.budget.can_start_video(
+        120 * 60,
+        BudgetSettings(max_source_minutes_per_day=300),
+    )
+    assert not decision.allowed
+    assert "240.0 used + 120.0" in decision.reason
+    assert "> 300 minutes" in decision.reason

@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+from datetime import datetime
+
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtGui import QFontDatabase, QTextCursor
 from PySide6.QtWidgets import (
+    QApplication,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from clipradar.models import JobStatus
 from clipradar.storage.repositories import Repositories
-from clipradar.ui.common import card_layout, clear_layout, format_timestamp, muted_label, status_pill, title_label
+from clipradar.ui.common import card_layout, muted_label, status_pill, title_label
 
 
 class MetricCard(QWidget):
@@ -83,20 +87,25 @@ class DashboardPage(QWidget):
 
         activity_card, activity_layout = card_layout()
         header = QHBoxLayout()
-        header.addWidget(title_label("Recent activity"))
+        header.addWidget(title_label("Activity log"))
         header.addStretch(1)
         self.activity_count = muted_label("")
         header.addWidget(self.activity_count)
+        self.copy_logs = QPushButton("Copy logs")
+        self.copy_logs.setFixedWidth(102)
+        self.copy_logs.clicked.connect(self._copy_logs)
+        header.addWidget(self.copy_logs)
         activity_layout.addLayout(header)
-        self.activity_widget = QWidget()
-        self.activity_layout = QVBoxLayout(self.activity_widget)
-        self.activity_layout.setContentsMargins(0, 4, 0, 0)
-        self.activity_layout.setSpacing(0)
-        activity_scroll = QScrollArea()
-        activity_scroll.setWidgetResizable(True)
-        activity_scroll.setMinimumHeight(230)
-        activity_scroll.setWidget(self.activity_widget)
-        activity_layout.addWidget(activity_scroll)
+        self.activity_log = QPlainTextEdit()
+        self.activity_log.setObjectName("ActivityLog")
+        self.activity_log.setReadOnly(True)
+        self.activity_log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.activity_log.setMinimumHeight(260)
+        self.activity_log.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
+        self.activity_log.setPlaceholderText(
+            "Activity will appear here once channels are checked or videos are analyzed."
+        )
+        activity_layout.addWidget(self.activity_log)
         root.addWidget(activity_card, 1)
 
     def set_monitoring_busy(self, busy: bool) -> None:
@@ -117,25 +126,64 @@ class DashboardPage(QWidget):
         self.metrics["cost"].set_value(f"€{usage['estimated_cost_eur']:.3f}")
         self.metrics["minutes"].set_value(f"{usage['source_minutes']:.1f}")
 
-        activities = self.repos.activity.recent(12)
-        self.activity_count.setText(f"{len(activities)} latest events")
-        clear_layout(self.activity_layout)
-        if not activities:
-            empty = muted_label("Activity will appear here once channels are checked or videos are analyzed.", wrap=True)
-            empty.setContentsMargins(0, 24, 0, 24)
-            self.activity_layout.addWidget(empty)
-        for item in activities:
-            row = QWidget()
-            line = QHBoxLayout(row)
-            line.setContentsMargins(0, 9, 0, 9)
-            marker = QLabel("●")
-            marker.setStyleSheet({"error": "color:#ff7070", "success": "color:#caff00", "warning": "color:#ffcf5a"}.get(item["level"], "color:#77827c"))
-            message = QLabel(item["message"])
-            message.setWordWrap(True)
-            when = muted_label(format_timestamp(item["created_at"]))
-            line.addWidget(marker)
-            line.addWidget(message, 1)
-            line.addWidget(when)
-            self.activity_layout.addWidget(row)
-        self.activity_layout.addStretch(1)
+        activities = self.repos.activity.recent(200)
+        runs = len({item["job_id"] for item in activities if item["job_id"]})
+        count_text = f"{len(activities)} event{'s' if len(activities) != 1 else ''}"
+        if runs:
+            count_text += f" · {runs} run{'s' if runs != 1 else ''}"
+        self.activity_count.setText(count_text if activities else "No events yet")
+        self.activity_log.setPlainText(_format_activity_log(activities))
+        cursor = self.activity_log.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        self.activity_log.setTextCursor(cursor)
 
+    def _copy_logs(self) -> None:
+        text = self.activity_log.toPlainText()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self.copy_logs.setText("Copied")
+        QTimer.singleShot(1500, lambda: self.copy_logs.setText("Copy logs"))
+
+
+def _format_activity_log(activities: list[dict]) -> str:
+    groups: dict[str, list[dict]] = {}
+    for item in activities:
+        key = str(item["job_id"] or f"event:{item['id']}")
+        groups.setdefault(key, []).append(item)
+    sections: list[str] = []
+    for key, items in groups.items():
+        newest = items[0]
+        kind = str(newest.get("operation_type") or "Application").upper()
+        title = str(newest.get("operation_title") or "").strip()
+        header = f"{kind} · {title}" if title else kind
+        metadata: list[str] = []
+        channel = str(newest.get("channel_name") or "").strip()
+        if channel:
+            metadata.append(channel)
+        if newest.get("job_id"):
+            attempt = int(newest.get("attempt") or 0)
+            metadata.append(f"Attempt {max(1, attempt)}")
+            metadata.append(f"Job {str(newest['job_id'])[:8]}")
+        status = str(newest.get("operation_status") or "").strip()
+        if status:
+            metadata.append(f"Status {status}")
+        lines = ["─" * 88, header]
+        if metadata:
+            lines.append(" · ".join(metadata))
+        lines.append("─" * 88)
+        for item in reversed(items):
+            level = str(item.get("level") or "info").upper().ljust(7)
+            lines.append(f"{_log_timestamp(item.get('created_at'))}  {level}  {item.get('message', '')}")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
+
+
+def _log_timestamp(value: str | None) -> str:
+    if not value:
+        return "-- --- ---- --:--:--"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.astimezone().strftime("%d %b %Y %H:%M:%S")
+    except ValueError:
+        return value[:20].ljust(20)

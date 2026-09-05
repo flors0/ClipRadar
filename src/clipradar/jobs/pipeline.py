@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Callable
 
 from clipradar.ai.budget import BudgetGuard
-from clipradar.ai.gemini import GeminiClient, GeminiError
+from clipradar.ai.gemini import GEMINI_MAX_ATTEMPTS, GeminiClient, GeminiError
 from clipradar.analysis.candidates import CandidateDetector
 from clipradar.app.paths import AppPaths
 from clipradar.media.ffmpeg import create_candidate_preview, probe_media
@@ -46,8 +46,18 @@ class AnalysisPipeline:
         job = self._require_job(job_id)
         source = self._require_video(job.source_video_id)
         try:
+            self.repos.activity.add(
+                f"Analysis attempt {job.attempts + 1} started · {source.title}", "info", job.id
+            )
             self._set(job, JobStatus.DOWNLOADING, "Preparing source video", 0.05, progress, increment=True)
+            cached_source = bool(source.local_path and Path(source.local_path).is_file())
             source, info_path = self._ensure_download(source)
+            self.repos.activity.add(
+                "Source video ready · existing download reused"
+                if cached_source else "Source video downloaded and verified",
+                "success",
+                job.id,
+            )
             clip_settings = self._clip_settings_for(source)
             self._set(job, JobStatus.ANALYZING, "Detecting local candidates", 0.22, progress)
             heatmap = self.youtube.load_heatmap(info_path)
@@ -69,6 +79,7 @@ class AnalysisPipeline:
             limits = self.settings.budget()
             decision = self.budget.can_start_video(duration, limits)
             if not decision.allowed:
+                self.repos.activity.add(f"Budget check blocked analysis · {decision.reason}", "warning", job.id)
                 raise RuntimeError(decision.reason)
             key = self.settings.secrets.get_gemini_key()
             if not key:
@@ -78,39 +89,68 @@ class AnalysisPipeline:
             publishing_settings = self.settings.publishing()
             ranked: list[ClipCandidate] = []
             max_outputs = min(clip_settings.max_clips_per_video, limits.max_clips_per_video)
+            self.repos.activity.add(
+                f"Local analysis found {len(candidates)} candidate{'s' if len(candidates) != 1 else ''} "
+                f"across {duration / 60:.1f} source minutes · model {ai_settings.model} · "
+                f"up to {max_outputs} clips · minimum score {ai_settings.minimum_ai_score}",
+                "info",
+                job.id,
+            )
             for index, candidate in enumerate(candidates):
                 if len(ranked) >= max_outputs:
                     break
-                reserve = self._conservative_request_reserve(candidate)
+                per_attempt_reserve = self._conservative_request_reserve(candidate, ai_settings.model)
+                reserve = per_attempt_reserve * GEMINI_MAX_ATTEMPTS
                 request_decision = self.budget.can_send_request(reserve, limits)
                 if not request_decision.allowed:
                     self.repos.activity.add(request_decision.reason, "warning", job.id)
                     break
-                # Reserve conservatively before the call. This makes the daily cap a hard
-                # preflight gate even if a request fails before token counts are returned.
-                self.repos.usage.add(estimated_cost_eur=reserve)
                 fraction = 0.32 + 0.33 * (index / max(1, len(candidates)))
                 self._set(job, JobStatus.ANALYZING, f"Gemini ranking candidate {index + 1}/{len(candidates)}", fraction, progress)
                 preview = self.paths.candidates / f"{source.youtube_video_id}_{candidate.id}.mp4"
                 create_candidate_preview(source.local_path, preview, candidate.start_seconds, candidate.end_seconds)
+                # Reserve both possible structured-output attempts before the first paid call.
+                # Unused reserve is reconciled immediately after the response.
+                self.repos.usage.add(estimated_cost_eur=reserve)
+                self.repos.activity.add(
+                    f"Candidate {index + 1}/{len(candidates)} sent to {ai_settings.model} · "
+                    f"source {candidate.start_seconds:.1f}s–{candidate.end_seconds:.1f}s · "
+                    f"local score {candidate.local_score:.0f}/100",
+                    "info",
+                    job.id,
+                )
                 try:
-                    result = self.gemini.analyze_candidate(
-                        api_key=key,
-                        model=ai_settings.model,
-                        preview_path=preview,
-                        candidate=candidate,
-                        source_duration=duration,
-                        minimum_duration=clip_settings.minimum_duration,
-                        maximum_duration=clip_settings.maximum_duration,
-                        temperature=ai_settings.temperature,
-                        description_style=publishing_settings.description_style,
-                        metadata_language=publishing_settings.metadata_language,
-                    )
+                    try:
+                        result = self.gemini.analyze_candidate(
+                            api_key=key,
+                            model=ai_settings.model,
+                            preview_path=preview,
+                            candidate=candidate,
+                            source_duration=duration,
+                            minimum_duration=clip_settings.minimum_duration,
+                            maximum_duration=clip_settings.maximum_duration,
+                            temperature=ai_settings.temperature,
+                            description_style=publishing_settings.description_style,
+                            metadata_language=publishing_settings.metadata_language,
+                            event_callback=lambda message, level: self.repos.activity.add(
+                                f"Candidate {index + 1}/{len(candidates)} · {message}", level, job.id
+                            ),
+                        )
+                    except GeminiError as exc:
+                        unknown_requests = max(0, exc.request_count - exc.responses_with_usage)
+                        retained_cost = exc.estimated_cost_eur + per_attempt_reserve * unknown_requests
+                        self.repos.usage.add(
+                            requests=exc.request_count,
+                            input_tokens=exc.input_tokens,
+                            output_tokens=exc.output_tokens,
+                            estimated_cost_eur=retained_cost - reserve,
+                        )
+                        raise
                 finally:
                     if not self.settings.storage().keep_candidate_previews:
                         preview.unlink(missing_ok=True)
                 self.repos.usage.add(
-                    requests=1,
+                    requests=result.request_count,
                     input_tokens=result.input_tokens,
                     output_tokens=result.output_tokens,
                     estimated_cost_eur=result.estimated_cost_eur - reserve,
@@ -142,12 +182,35 @@ class AnalysisPipeline:
                 candidate.facecam_y = result.facecam_y
                 candidate.facecam_width = result.facecam_width
                 candidate.facecam_height = result.facecam_height
-                if result.score >= ai_settings.minimum_ai_score and not self._overlaps_selected(candidate, ranked):
+                meets_threshold = result.score >= ai_settings.minimum_ai_score
+                overlaps = meets_threshold and self._overlaps_selected(candidate, ranked)
+                if meets_threshold and not overlaps:
                     ranked.append(candidate)
+                outcome = (
+                    "selected for rendering"
+                    if meets_threshold and not overlaps
+                    else "skipped because it overlaps a stronger selected moment"
+                    if overlaps
+                    else f"below the {ai_settings.minimum_ai_score}/100 threshold"
+                )
+                self.repos.activity.add(
+                    f"Candidate {index + 1}/{len(candidates)} scored {result.score}/100 · {outcome} · "
+                    f"{result.request_count} Gemini request{'s' if result.request_count != 1 else ''} · "
+                    f"{result.input_tokens:,} input / {result.output_tokens:,} output tokens",
+                    "success" if meets_threshold and not overlaps else "info",
+                    job.id,
+                )
 
             ranked.sort(key=lambda item: item.ai_score or 0, reverse=True)
             rendered = 0
             for index, candidate in enumerate(ranked[:max_outputs]):
+                self.repos.activity.add(
+                    f"Rendering clip {index + 1}/{len(ranked[:max_outputs])} · "
+                    f"{candidate.render_start:.1f}s–{candidate.render_end:.1f}s · "
+                    f"framing {candidate.reframe_mode}",
+                    "info",
+                    job.id,
+                )
                 self._set(
                     job, JobStatus.RENDERING, f"Rendering clip {index + 1}/{len(ranked[:max_outputs])}",
                     0.68 + 0.27 * (index / max(1, len(ranked))), progress,
@@ -168,7 +231,7 @@ class AnalysisPipeline:
         except Exception as exc:
             safe_error = str(exc)[:700]
             self.repos.jobs.update(job.id, JobStatus.FAILED, "Failed", job.progress, safe_error)
-            self.repos.activity.add(f"{source.title} failed: {safe_error}", "error", job.id)
+            self.repos.activity.add(f"Analysis failed · {safe_error}", "error", job.id)
             logger.exception("Analysis job %s failed", job.id)
             raise
 
@@ -246,5 +309,7 @@ class AnalysisPipeline:
         return False
 
     @staticmethod
-    def _conservative_request_reserve(candidate: ClipCandidate) -> float:
-        return max(0.01, (candidate.end_seconds - candidate.start_seconds) * 0.0008)
+    def _conservative_request_reserve(candidate: ClipCandidate, model: str = "") -> float:
+        duration_reserve = (candidate.end_seconds - candidate.start_seconds) * 0.0008
+        high_quality_floor = 0.06 if any(value in model.lower() for value in ("3.8", "3.7")) else 0.025
+        return max(high_quality_floor, duration_reserve)

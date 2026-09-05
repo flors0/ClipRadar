@@ -386,6 +386,22 @@ class ClipRepository:
                 (status.value, utc_now(), clip_id),
             )
 
+    def delete(self, clip_id: int) -> bool:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT candidate_id FROM rendered_clips WHERE id = ?", (clip_id,)
+            ).fetchone()
+            if not row:
+                return False
+            candidate_id = int(row["candidate_id"])
+            connection.execute("DELETE FROM rendered_clips WHERE id = ?", (clip_id,))
+            remaining = connection.execute(
+                "SELECT 1 FROM rendered_clips WHERE candidate_id = ? LIMIT 1", (candidate_id,)
+            ).fetchone()
+            if not remaining:
+                connection.execute("DELETE FROM clip_candidates WHERE id = ?", (candidate_id,))
+        return True
+
     def list_review(self, include_decided: bool = False) -> list[dict[str, Any]]:
         where = "" if include_decided else "WHERE r.status IN ('Ready', 'Regenerating')"
         with self.db.connection() as connection:
@@ -646,9 +662,28 @@ class ActivityRepository:
                 (utc_now(), level, message, job_id),
             )
 
-    def recent(self, limit: int = 12) -> list[dict[str, Any]]:
+    def recent(self, limit: int = 200) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
-            rows = connection.execute("SELECT * FROM activity ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            rows = connection.execute(
+                """SELECT a.*,
+                          CASE
+                            WHEN j.id IS NOT NULL THEN 'Analysis'
+                            WHEN p.id IS NOT NULL THEN 'YouTube upload'
+                            ELSE 'Application'
+                          END AS operation_type,
+                          COALESCE(v.title, p.title, '') AS operation_title,
+                          COALESCE(c.name, ya.channel_name, '') AS channel_name,
+                          COALESCE(j.attempts, p.attempts, 0) AS attempt,
+                          COALESCE(j.status, p.status, '') AS operation_status
+                   FROM activity a
+                   LEFT JOIN analysis_jobs j ON j.id = a.job_id
+                   LEFT JOIN source_videos v ON v.id = j.source_video_id
+                   LEFT JOIN channels c ON c.id = v.channel_id
+                   LEFT JOIN publish_jobs p ON p.id = a.job_id
+                   LEFT JOIN youtube_accounts ya ON ya.id = p.account_id
+                   ORDER BY a.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
         return [dict(row) for row in rows]
 
 

@@ -16,15 +16,18 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Download source media first, then fetch at most one available English VTT caption track as an optional best-effort enhancement.
 - Preselect candidate ranges locally using audio energy, transcript reactions, scene changes, and YouTube heatmap data when available.
 - Send only compressed candidate previews to the selected Gemini model.
+- Validate Gemini finish reasons and retry one incomplete structured response with a larger output budget across every selectable model.
 - Apply hard daily limits for videos, source minutes, clips, and estimated AI cost.
 - De-duplicate overlapping moments and render only the best candidates.
 - Ask Gemini for the important scene focus and choose a subject crop, context-preserving frame, or facecam-plus-gameplay layout.
 - Render 9:16 H.264 MP4 with scene-aware reframing and loudness normalization. Burned captions are disabled by default.
 - Generate a relevant YouTube title, description, and tags for every newly analyzed candidate.
 - Preview, approve, reject, regenerate, open, or trace a clip back to its source in the review queue.
+- Permanently remove a review item and its local file from the right-click menu, including recovery from files deleted outside ClipRadar.
 - Edit Gemini metadata, upload immediately, or choose a scheduled public release from the review flow.
 - Persist upload progress, safely recover interrupted uploads, and track results in a compact publishing queue.
 - Recover interrupted jobs safely after an application restart.
+- Inspect up to 200 structured, attempt-grouped activity events in one selectable and copyable log view.
 - Build and smoke-test a bundled Windows EXE through GitHub Actions.
 
 ## Security

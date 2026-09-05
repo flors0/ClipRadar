@@ -24,6 +24,32 @@ class ReviewService:
         self.repos.clips.update_status(clip_id, ClipStatus.REJECTED)
         self.repos.activity.add("Clip rejected")
 
+    def delete_permanently(self, clip_id: int) -> None:
+        clip = self._require(clip_id)
+        if clip.status == ClipStatus.REGENERATING:
+            raise RuntimeError("Wait for the active regeneration to finish before deleting this clip.")
+        path = Path(clip.file_path)
+        file_existed = path.is_file() or path.is_symlink()
+        sidecar = path.with_suffix(".ass")
+        if sidecar.is_file() or sidecar.is_symlink():
+            try:
+                sidecar.unlink()
+            except OSError as exc:
+                raise OSError(f"The caption sidecar could not be deleted: {exc}") from exc
+        if file_existed:
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise OSError(f"The clip file could not be deleted: {exc}") from exc
+        if not self.repos.clips.delete(clip_id):
+            raise ValueError("The rendered clip no longer exists.")
+        message = (
+            f"Clip #{clip_id} permanently deleted from the review queue and disk"
+            if file_existed
+            else f"Clip #{clip_id} removed from the review queue · file was already missing"
+        )
+        self.repos.activity.add(message, "warning")
+
     def prepare_regeneration(self, clip_id: int, reframe_mode: str | None = None) -> int:
         clip = self._require(clip_id)
         if reframe_mode:

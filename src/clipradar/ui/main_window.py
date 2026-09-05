@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.2.0")
+        version = QLabel("v0.2.1")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -169,6 +169,7 @@ class MainWindow(QMainWindow):
         self.channels.update_requested.connect(self._update_channel)
         self.review.approve_requested.connect(self._approve)
         self.review.reject_requested.connect(self._reject)
+        self.review.delete_requested.connect(self._delete_clip)
         self.review.regenerate_requested.connect(self._regenerate)
         self.review.publish_requested.connect(self._publish)
         self.publishing.retry_requested.connect(self._retry_publish)
@@ -246,6 +247,14 @@ class MainWindow(QMainWindow):
             self.services.review.reject(clip_id)
             self.refresh_all()
             self._toast("Clip rejected")
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+
+    def _delete_clip(self, clip_id: int) -> None:
+        try:
+            self.services.review.delete_permanently(clip_id)
+            self.refresh_all()
+            self._toast("Clip permanently deleted")
         except Exception as exc:
             self._toast(str(exc), error=True)
 

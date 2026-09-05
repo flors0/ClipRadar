@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -19,9 +19,35 @@ GEMINI_MODELS = [
     ("Gemini 2.5 Flash · legacy stable", "gemini-2.5-flash"),
 ]
 
+GEMINI_MAX_ATTEMPTS = 2
+_OUTPUT_TOKEN_LIMITS = (8192, 16384)
+GeminiEventCallback = Callable[[str, str], None]
+
 
 class GeminiError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_count: int = 0,
+        responses_with_usage: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        estimated_cost_eur: float = 0.0,
+    ):
+        super().__init__(message)
+        self.request_count = request_count
+        self.responses_with_usage = responses_with_usage
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.estimated_cost_eur = estimated_cost_eur
+
+
+class _StructuredOutputError(RuntimeError):
+    def __init__(self, message: str, finish_reason: str = "", *, retryable: bool = True):
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.retryable = retryable
 
 
 class ClipEvaluation(BaseModel):
@@ -56,6 +82,7 @@ class EvaluationResult:
     input_tokens: int
     output_tokens: int
     estimated_cost_eur: float
+    request_count: int = 1
     title: str = ""
     description: str = ""
     tags: tuple[str, ...] = ()
@@ -95,6 +122,7 @@ class GeminiClient:
         temperature: float,
         description_style: str = "Auto",
         metadata_language: str = "Auto",
+        event_callback: GeminiEventCallback | None = None,
     ) -> EvaluationResult:
         preview_path = Path(preview_path)
         if not api_key.strip():
@@ -109,27 +137,84 @@ class GeminiClient:
             description_style,
             metadata_language,
         )
+        event_callback = event_callback or (lambda _message, _level: None)
+        request_count = 0
+        responses_with_usage = 0
+        input_tokens = 0
+        output_tokens = 0
         try:
             from google import genai
             from google.genai import types
 
             part = types.Part.from_bytes(data=data, mime_type="video/mp4")
-            config = types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ClipEvaluation,
-                temperature=max(0.0, min(1.0, temperature)),
-                max_output_tokens=1400,
-            )
             with genai.Client(api_key=api_key.strip()) as client:
-                response = client.models.generate_content(model=model, contents=[prompt, part], config=config)
-            evaluation = response.parsed
-            if not isinstance(evaluation, ClipEvaluation):
-                evaluation = ClipEvaluation.model_validate(json.loads(response.text))
-            usage = getattr(response, "usage_metadata", None)
-            input_tokens = int(getattr(usage, "prompt_token_count", 0) or 0)
-            output_tokens = int(getattr(usage, "candidates_token_count", 0) or 0)
+                for attempt in range(GEMINI_MAX_ATTEMPTS):
+                    request_count += 1
+                    config = types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=ClipEvaluation,
+                        temperature=max(0.0, min(1.0, temperature)) if attempt == 0 else 0.0,
+                        max_output_tokens=_OUTPUT_TOKEN_LIMITS[attempt],
+                    )
+                    retry_prompt = prompt
+                    if attempt:
+                        retry_prompt += (
+                            "\nThis is a retry because the previous structured response was incomplete. "
+                            "Return one complete, compact JSON object and keep the description under 900 characters."
+                        )
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[retry_prompt, part],
+                        config=config,
+                    )
+                    usage = getattr(response, "usage_metadata", None)
+                    if usage is not None:
+                        responses_with_usage += 1
+                    input_tokens += int(getattr(usage, "prompt_token_count", 0) or 0)
+                    output_tokens += int(getattr(usage, "candidates_token_count", 0) or 0)
+                    output_tokens += int(getattr(usage, "thoughts_token_count", 0) or 0)
+                    try:
+                        evaluation = self._parse_evaluation(response)
+                        break
+                    except _StructuredOutputError as exc:
+                        if not exc.retryable:
+                            reason = exc.finish_reason or "provider policy"
+                            raise GeminiError(
+                                f"Gemini stopped this candidate before completing it ({reason}).",
+                                request_count=request_count,
+                                responses_with_usage=responses_with_usage,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+                            ) from exc
+                        if attempt + 1 >= GEMINI_MAX_ATTEMPTS:
+                            reason = f" ({exc.finish_reason})" if exc.finish_reason else ""
+                            raise GeminiError(
+                                "Gemini returned an incomplete structured response"
+                                f"{reason} twice. Please retry this video; no partial metadata was saved.",
+                                request_count=request_count,
+                                responses_with_usage=responses_with_usage,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+                            ) from exc
+                        reason = f" · finish reason: {exc.finish_reason}" if exc.finish_reason else ""
+                        event_callback(
+                            "Gemini response was incomplete"
+                            f"{reason}; retrying once with a larger output limit.",
+                            "warning",
+                        )
         except Exception as exc:
-            raise GeminiError(self._safe_message(exc, api_key)) from exc
+            if isinstance(exc, GeminiError):
+                raise
+            raise GeminiError(
+                self._safe_message(exc, api_key),
+                request_count=request_count,
+                responses_with_usage=responses_with_usage,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+            ) from exc
 
         candidate_duration = candidate.end_seconds - candidate.start_seconds
         start_offset = min(candidate_duration, max(0.0, evaluation.start_offset_seconds))
@@ -158,6 +243,7 @@ class GeminiClient:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+            request_count=request_count,
             title=title,
             description=description,
             tags=tags,
@@ -169,6 +255,49 @@ class GeminiClient:
             facecam_width=facecam[2],
             facecam_height=facecam[3],
         )
+
+    @staticmethod
+    def _parse_evaluation(response: object) -> ClipEvaluation:
+        finish_reason = _finish_reason(response)
+        if finish_reason and finish_reason != "STOP":
+            blocked = finish_reason in {
+                "SAFETY",
+                "RECITATION",
+                "BLOCKLIST",
+                "PROHIBITED_CONTENT",
+                "SPII",
+            }
+            raise _StructuredOutputError(
+                "Gemini did not complete the structured response.",
+                finish_reason,
+                retryable=not blocked,
+            )
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, ClipEvaluation):
+            return parsed
+        if parsed is not None:
+            try:
+                return ClipEvaluation.model_validate(parsed)
+            except Exception:
+                pass
+        try:
+            text = str(getattr(response, "text", "") or "").strip()
+        except Exception:
+            text = ""
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        try:
+            return ClipEvaluation.model_validate(json.loads(text))
+        except Exception as exc:
+            raise _StructuredOutputError(
+                "Gemini returned malformed or truncated JSON.",
+                finish_reason,
+            ) from exc
 
     @staticmethod
     def _prompt(
@@ -241,6 +370,17 @@ def estimate_cost_eur(model: str, input_tokens: int, output_tokens: int) -> floa
         input_usd, output_usd = 0.60, 3.50
     usd = input_tokens / 1_000_000 * input_usd + output_tokens / 1_000_000 * output_usd
     return round(usd * 0.95, 6)
+
+
+def _finish_reason(response: object) -> str:
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        return ""
+    value = getattr(candidates[0], "finish_reason", None)
+    if value is None:
+        return ""
+    raw = getattr(value, "value", value)
+    return str(raw).rsplit(".", 1)[-1].upper()
 
 
 def _clean_title(value: str) -> str:

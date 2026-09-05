@@ -24,6 +24,7 @@ class PublishingService:
         self.repos = repositories
         self.settings = settings
         self.client = client or YouTubePublishingClient()
+        self._progress_milestones: dict[str, int] = {}
 
     def import_client_file(self, path: str | Path) -> str:
         path = Path(path)
@@ -122,7 +123,7 @@ class PublishingService:
         saved = self.repos.publish.add(job)
         self.repos.clips.update_status(clip_id, ClipStatus.APPROVED)
         verb = "scheduled" if normalized_schedule else "queued"
-        self.repos.activity.add(f"{clean_title} {verb} for YouTube", "success")
+        self.repos.activity.add(f"{clean_title} {verb} for YouTube", "success", saved.id)
         return saved
 
     def upload(self, job_id: str, progress: ProgressCallback | None = None) -> str:
@@ -138,6 +139,13 @@ class PublishingService:
         self.repos.publish.update(
             job.id, PublishStatus.UPLOADING, 0, increment_attempts=True
         )
+        self._progress_milestones[job.id] = 0
+        destination = f"scheduled for {job.scheduled_for}" if job.scheduled_for else job.privacy_status
+        self.repos.activity.add(
+            f"Upload attempt {job.attempts + 1} started · {destination} · {len(job.tags)} tags",
+            "info",
+            job.id,
+        )
         try:
             result = self.client.upload(
                 job,
@@ -152,6 +160,7 @@ class PublishingService:
                 job.id, result.status, 1, remote_video_id=result.video_id, error=None
             )
             self.settings.secrets.delete_youtube_upload_session(job.id)
+            self._progress_milestones.pop(job.id, None)
             self.repos.activity.add(
                 f"Uploaded {job.title} to {account.channel_name}", "success", job.id
             )
@@ -165,6 +174,7 @@ class PublishingService:
                 error=str(exc)[:700],
             )
             self.repos.activity.add(f"YouTube upload failed: {str(exc)[:500]}", "error", job.id)
+            self._progress_milestones.pop(job.id, None)
             raise
 
     def retry(self, job_id: str) -> None:
@@ -172,6 +182,7 @@ class PublishingService:
         if job.status != PublishStatus.FAILED:
             raise YouTubePublishingError("Only a failed upload can be retried.")
         self.repos.publish.retry(job_id)
+        self.repos.activity.add("Upload queued for another attempt", "warning", job_id)
 
     def cancel(self, job_id: str) -> None:
         job = self._job(job_id)
@@ -180,9 +191,15 @@ class PublishingService:
         self.repos.publish.cancel(job_id)
         self.repos.clips.update_status(job.rendered_clip_id, ClipStatus.READY)
         self.settings.secrets.delete_youtube_upload_session(job_id)
+        self.repos.activity.add("Publishing job cancelled · clip returned to Review", "warning", job_id)
 
     def _progress(self, job_id: str, value: float, callback: ProgressCallback) -> None:
         self.repos.publish.update(job_id, PublishStatus.UPLOADING, value)
+        milestone = min(75, int(max(0.0, value) * 4) * 25)
+        previous = self._progress_milestones.get(job_id, 0)
+        if milestone >= 25 and milestone > previous:
+            self._progress_milestones[job_id] = milestone
+            self.repos.activity.add(f"YouTube upload reached {milestone}%", "info", job_id)
         callback("Uploading to YouTube", value)
 
     def _account(self, account_id: int) -> YouTubeAccount:

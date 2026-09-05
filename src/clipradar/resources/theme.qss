@@ -74,6 +74,13 @@ QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {
     selection-background-color: #8db400;
 }
 QPlainTextEdit { padding: 9px 12px; }
+QPlainTextEdit#ActivityLog {
+    min-height: 240px;
+    color: #dce2de;
+    background: #080b09;
+    border-color: #202722;
+    font-size: 12px;
+}
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus { border-color: #8bae17; }
 QComboBox::drop-down { border: none; width: 30px; }
 QComboBox QAbstractItemView { background: #111512; border: 1px solid #333c36; selection-background-color: #29321c; }

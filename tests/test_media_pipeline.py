@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clipradar.ai.gemini import EvaluationResult
 from clipradar.analysis.candidates import CandidateDetector
 from clipradar.media.ffmpeg import probe_media
@@ -20,6 +22,7 @@ class FakeGemini:
             input_tokens=100,
             output_tokens=20,
             estimated_cost_eur=0.0002,
+            request_count=2,
             title="That Minecraft Save Was Impossible",
             description="A last-second reaction turns an impossible Minecraft moment into a perfect short.",
             tags=("Minecraft", "gaming reaction", "clutch"),
@@ -146,3 +149,6 @@ def test_complete_local_pipeline_reaches_review_queue(services, synthetic_video:
     assert all(item["ai_title"] for item in queue)
     assert all("Minecraft" in item["ai_tags_json"] for item in queue)
     assert all(item["reframe_mode"] == "gaming_split" for item in queue)
+    usage = services.repositories.usage.get_today()
+    assert usage["requests"] == rendered_count * 2
+    assert usage["estimated_cost_eur"] == pytest.approx(rendered_count * 0.0002)
