@@ -9,6 +9,7 @@ from clipradar.app.paths import AppPaths
 from clipradar.channels.service import ChannelService
 from clipradar.jobs.pipeline import AnalysisPipeline
 from clipradar.monitoring.service import MonitoringService
+from clipradar.publishing.service import PublishingService
 from clipradar.rendering.renderer import ClipRenderer
 from clipradar.review.service import ReviewService
 from clipradar.settings.secrets import KeyringSecretStore, SecretStore
@@ -30,6 +31,7 @@ class AppServices:
     gemini: GeminiClient
     pipeline: AnalysisPipeline
     review: ReviewService
+    publishing: PublishingService
 
     @classmethod
     def create(cls, paths: AppPaths, secret_store: SecretStore | None = None) -> "AppServices":
@@ -52,7 +54,11 @@ class AppServices:
             ClipRenderer(paths),
         )
         review = ReviewService(repositories, pipeline)
+        publishing = PublishingService(repositories, settings)
         repositories.jobs.recover_interrupted()
         repositories.clips.recover_regenerating()
-        return cls(paths, database, repositories, settings, youtube, channels, monitoring, gemini, pipeline, review)
-
+        repositories.publish.recover_interrupted()
+        return cls(
+            paths, database, repositories, settings, youtube, channels, monitoring,
+            gemini, pipeline, review, publishing,
+        )

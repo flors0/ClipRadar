@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
+import sqlite3
+
+from clipradar.app.logging_setup import RedactingFilter
 from clipradar.models import Channel
 from clipradar.settings.models import AISettings, ClipSettings
+from clipradar.storage.database import Database
 
 
 def test_database_and_settings_survive_restart(services):
@@ -35,3 +41,66 @@ def test_invalid_clip_duration_is_rejected(services):
     else:
         raise AssertionError("invalid duration settings were accepted")
 
+
+def test_version_one_database_migrates_metadata_publishing_and_disables_captions(tmp_path):
+    path = tmp_path / "version-one.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (version INTEGER NOT NULL);
+            INSERT INTO schema_info(version) VALUES (1);
+            CREATE TABLE settings (
+                key TEXT PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE clip_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_video_id INTEGER NOT NULL,
+                start_seconds REAL NOT NULL,
+                end_seconds REAL NOT NULL,
+                local_score REAL NOT NULL,
+                signals_json TEXT NOT NULL DEFAULT '{}',
+                ai_score REAL,
+                ai_reason TEXT NOT NULL DEFAULT '',
+                refined_start_seconds REAL,
+                refined_end_seconds REAL,
+                status TEXT NOT NULL DEFAULT 'Detected'
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO settings(key, value_json, updated_at) VALUES ('clips', ?, '2026-01-01')",
+            (json.dumps({"captions_enabled": True, "word_highlighting": True}),),
+        )
+
+    database = Database(path)
+    database.initialize()
+    with database.connection() as connection:
+        version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(clip_candidates)")}
+        settings = json.loads(
+            connection.execute("SELECT value_json FROM settings WHERE key = 'clips'").fetchone()["value_json"]
+        )
+        tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert version == 2
+    assert {"ai_title", "ai_tags_json", "reframe_mode", "focus_x", "facecam_x"} <= columns
+    assert {"youtube_accounts", "publish_jobs"} <= tables
+    assert settings["captions_enabled"] is False
+    assert settings["word_highlighting"] is False
+
+
+def test_logging_filter_redacts_google_tokens():
+    record = logging.LogRecord(
+        "clipradar.test",
+        logging.ERROR,
+        __file__,
+        1,
+        'refresh_token="1//abcdefghijklmnopqrstuvwxyz" access_token=ya29.abcdefghijklmnopqrstuvwxyz',
+        (),
+        None,
+    )
+    assert RedactingFilter().filter(record)
+    message = record.getMessage()
+    assert "abcdefghijklmnopqrstuvwxyz" not in message
+    assert "[redacted]" in message

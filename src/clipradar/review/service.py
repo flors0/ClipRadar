@@ -24,8 +24,10 @@ class ReviewService:
         self.repos.clips.update_status(clip_id, ClipStatus.REJECTED)
         self.repos.activity.add("Clip rejected")
 
-    def prepare_regeneration(self, clip_id: int) -> int:
+    def prepare_regeneration(self, clip_id: int, reframe_mode: str | None = None) -> int:
         clip = self._require(clip_id)
+        if reframe_mode:
+            self.repos.candidates.update_reframe_mode(clip.candidate_id, reframe_mode)
         self.repos.clips.update_status(clip_id, ClipStatus.REGENERATING)
         return clip.candidate_id
 

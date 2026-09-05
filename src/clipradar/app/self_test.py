@@ -16,8 +16,12 @@ def run_self_test() -> int:
     modules = [
         "cv2",
         "google.genai",
+        "google.oauth2.credentials",
+        "googleapiclient.discovery",
+        "google_auth_oauthlib.flow",
         "keyring",
         "yt_dlp",
+        "requests_oauthlib",
     ]
     if os.name == "nt" or getattr(sys, "frozen", False):
         modules.extend(("PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"))
@@ -32,7 +36,10 @@ def run_self_test() -> int:
         assert services.settings.secrets.get_gemini_key() == "self-test-only"
         with services.database.connection() as connection:
             tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        required = {"channels", "source_videos", "analysis_jobs", "clip_candidates", "rendered_clips", "settings", "ai_usage"}
+        required = {
+            "channels", "source_videos", "analysis_jobs", "clip_candidates", "rendered_clips",
+            "youtube_accounts", "publish_jobs", "settings", "ai_usage",
+        }
         assert required <= tables
         assert Path(bundled_binary("ffmpeg")).exists()
         assert Path(bundled_binary("ffprobe")).exists()

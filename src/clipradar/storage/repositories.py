@@ -12,8 +12,11 @@ from clipradar.models import (
     ClipCandidate,
     ClipStatus,
     JobStatus,
+    PublishJob,
+    PublishStatus,
     RenderedClip,
     SourceVideo,
+    YouTubeAccount,
     utc_now,
 )
 from clipradar.storage.database import Database
@@ -39,6 +42,7 @@ def _job(row: Any) -> AnalysisJob:
 def _candidate(row: Any) -> ClipCandidate:
     data = dict(row)
     data["signals"] = json.loads(data.pop("signals_json") or "{}")
+    data["ai_tags"] = json.loads(data.pop("ai_tags_json") or "[]")
     return ClipCandidate(**data)
 
 
@@ -46,6 +50,19 @@ def _clip(row: Any) -> RenderedClip:
     data = dict(row)
     data["status"] = ClipStatus(data["status"])
     return RenderedClip(**data)
+
+
+def _youtube_account(row: Any) -> YouTubeAccount:
+    return YouTubeAccount(**dict(row))
+
+
+def _publish_job(row: Any) -> PublishJob:
+    data = dict(row)
+    data["tags"] = json.loads(data.pop("tags_json") or "[]")
+    data["made_for_kids"] = bool(data["made_for_kids"])
+    data["notify_subscribers"] = bool(data["notify_subscribers"])
+    data["status"] = PublishStatus(data["status"])
+    return PublishJob(**data)
 
 
 class ChannelRepository:
@@ -266,13 +283,18 @@ class CandidateRepository:
                 cursor = connection.execute(
                     """INSERT INTO clip_candidates
                        (source_video_id, start_seconds, end_seconds, local_score, signals_json, ai_score,
-                        ai_reason, refined_start_seconds, refined_end_seconds, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        ai_reason, refined_start_seconds, refined_end_seconds, status, ai_title,
+                        ai_description, ai_tags_json, reframe_mode, focus_x, focus_y, facecam_x,
+                        facecam_y, facecam_width, facecam_height)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         source_video_id, candidate.start_seconds, candidate.end_seconds, candidate.local_score,
                         json.dumps(candidate.signals, separators=(",", ":")), candidate.ai_score,
                         candidate.ai_reason, candidate.refined_start_seconds, candidate.refined_end_seconds,
-                        candidate.status,
+                        candidate.status, candidate.ai_title, candidate.ai_description,
+                        json.dumps(candidate.ai_tags, separators=(",", ":")), candidate.reframe_mode,
+                        candidate.focus_x, candidate.focus_y, candidate.facecam_x, candidate.facecam_y,
+                        candidate.facecam_width, candidate.facecam_height,
                     ),
                 )
                 candidate.id = cursor.lastrowid
@@ -292,18 +314,49 @@ class CandidateRepository:
         return _candidate(row) if row else None
 
     def apply_ai_result(
-        self, candidate_id: int, score: float, reason: str, refined_start: float, refined_end: float
+        self,
+        candidate_id: int,
+        score: float,
+        reason: str,
+        refined_start: float,
+        refined_end: float,
+        *,
+        title: str = "",
+        description: str = "",
+        tags: list[str] | None = None,
+        reframe_mode: str = "auto",
+        focus_x: float = 0.5,
+        focus_y: float = 0.5,
+        facecam_x: float | None = None,
+        facecam_y: float | None = None,
+        facecam_width: float | None = None,
+        facecam_height: float | None = None,
     ) -> None:
         with self.db.connection() as connection:
             connection.execute(
                 """UPDATE clip_candidates SET ai_score = ?, ai_reason = ?, refined_start_seconds = ?,
-                   refined_end_seconds = ?, status = 'Ranked' WHERE id = ?""",
-                (score, reason, refined_start, refined_end, candidate_id),
+                   refined_end_seconds = ?, ai_title = ?, ai_description = ?, ai_tags_json = ?,
+                   reframe_mode = ?, focus_x = ?, focus_y = ?, facecam_x = ?, facecam_y = ?,
+                   facecam_width = ?, facecam_height = ?, status = 'Ranked' WHERE id = ?""",
+                (
+                    score, reason, refined_start, refined_end, title, description,
+                    json.dumps(tags or [], separators=(",", ":")), reframe_mode, focus_x, focus_y,
+                    facecam_x, facecam_y, facecam_width, facecam_height, candidate_id,
+                ),
             )
 
     def mark_rendered(self, candidate_id: int) -> None:
         with self.db.connection() as connection:
             connection.execute("UPDATE clip_candidates SET status = 'Rendered' WHERE id = ?", (candidate_id,))
+
+    def update_reframe_mode(self, candidate_id: int, mode: str) -> None:
+        if mode not in {"auto", "focus", "gaming_split", "center", "contain"}:
+            raise ValueError("Select a valid reframe mode.")
+        with self.db.connection() as connection:
+            connection.execute(
+                "UPDATE clip_candidates SET reframe_mode = ? WHERE id = ?",
+                (mode, candidate_id),
+            )
 
 
 class ClipRepository:
@@ -338,7 +391,9 @@ class ClipRepository:
         with self.db.connection() as connection:
             rows = connection.execute(
                 f"""SELECT r.*, x.start_seconds, x.end_seconds, x.refined_start_seconds,
-                    x.refined_end_seconds, x.ai_score, x.ai_reason, v.title AS video_title,
+                    x.refined_end_seconds, x.ai_score, x.ai_reason, x.ai_title, x.ai_description,
+                    x.ai_tags_json, x.reframe_mode, x.focus_x, x.focus_y, x.facecam_x,
+                    x.facecam_y, x.facecam_width, x.facecam_height, v.title AS video_title,
                     v.url AS source_url, c.name AS channel_name
                     FROM rendered_clips r
                     JOIN clip_candidates x ON x.id = r.candidate_id
@@ -358,6 +413,186 @@ class ClipRepository:
             cursor = connection.execute(
                 "UPDATE rendered_clips SET status = 'Ready', updated_at = ? WHERE status = 'Regenerating'",
                 (utc_now(),),
+            )
+        return cursor.rowcount
+
+
+class YouTubeAccountRepository:
+    def __init__(self, database: Database):
+        self.db = database
+
+    def upsert(self, account: YouTubeAccount) -> YouTubeAccount:
+        with self.db.connection() as connection:
+            connection.execute(
+                """INSERT INTO youtube_accounts
+                   (channel_id, channel_name, channel_url, avatar_url, credential_key, connected_at, last_verified_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(channel_id) DO UPDATE SET
+                     channel_name = excluded.channel_name,
+                     channel_url = excluded.channel_url,
+                     avatar_url = excluded.avatar_url,
+                     credential_key = excluded.credential_key,
+                     last_verified_at = excluded.last_verified_at""",
+                (
+                    account.channel_id, account.channel_name, account.channel_url, account.avatar_url,
+                    account.credential_key, account.connected_at, account.last_verified_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM youtube_accounts WHERE channel_id = ?", (account.channel_id,)
+            ).fetchone()
+        return _youtube_account(row)
+
+    def list_all(self) -> list[YouTubeAccount]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM youtube_accounts ORDER BY channel_name COLLATE NOCASE"
+            ).fetchall()
+        return [_youtube_account(row) for row in rows]
+
+    def get(self, account_id: int) -> YouTubeAccount | None:
+        with self.db.connection() as connection:
+            row = connection.execute("SELECT * FROM youtube_accounts WHERE id = ?", (account_id,)).fetchone()
+        return _youtube_account(row) if row else None
+
+    def mark_verified(self, account_id: int, channel_name: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                "UPDATE youtube_accounts SET channel_name = ?, last_verified_at = ? WHERE id = ?",
+                (channel_name, utc_now(), account_id),
+            )
+
+    def delete(self, account_id: int) -> None:
+        with self.db.connection() as connection:
+            connection.execute("DELETE FROM youtube_accounts WHERE id = ?", (account_id,))
+
+
+class PublishRepository:
+    ACTIVE = (PublishStatus.QUEUED.value, PublishStatus.UPLOADING.value)
+
+    def __init__(self, database: Database):
+        self.db = database
+
+    def add(self, job: PublishJob) -> PublishJob:
+        values = asdict(job)
+        values["tags_json"] = json.dumps(values.pop("tags"), separators=(",", ":"))
+        values["status"] = job.status.value
+        values["made_for_kids"] = int(job.made_for_kids)
+        values["notify_subscribers"] = int(job.notify_subscribers)
+        columns = ", ".join(values)
+        placeholders = ", ".join(f":{name}" for name in values)
+        with self.db.connection() as connection:
+            existing = connection.execute(
+                "SELECT * FROM publish_jobs WHERE rendered_clip_id = ? AND account_id = ?",
+                (job.rendered_clip_id, job.account_id),
+            ).fetchone()
+            if existing:
+                if existing["status"] != PublishStatus.CANCELLED.value:
+                    raise ValueError("This clip already has a publishing job for that YouTube channel.")
+                values["id"] = existing["id"]
+                assignments = ", ".join(f"{name} = :{name}" for name in values if name != "id")
+                connection.execute(
+                    f"UPDATE publish_jobs SET {assignments} WHERE id = :id",
+                    values,
+                )
+            else:
+                connection.execute(f"INSERT INTO publish_jobs ({columns}) VALUES ({placeholders})", values)
+            row = connection.execute("SELECT * FROM publish_jobs WHERE id = ?", (values["id"],)).fetchone()
+        return _publish_job(row)
+
+    def get(self, job_id: str) -> PublishJob | None:
+        with self.db.connection() as connection:
+            row = connection.execute("SELECT * FROM publish_jobs WHERE id = ?", (job_id,)).fetchone()
+        return _publish_job(row) if row else None
+
+    def next_queued(self) -> PublishJob | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM publish_jobs WHERE status = ? ORDER BY created_at LIMIT 1",
+                (PublishStatus.QUEUED.value,),
+            ).fetchone()
+        return _publish_job(row) if row else None
+
+    def list_all(self, limit: int = 200) -> list[dict[str, Any]]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """SELECT p.*, a.channel_name AS account_name, a.channel_id AS account_channel_id,
+                   r.file_path, v.title AS source_title, c.name AS source_channel
+                   FROM publish_jobs p
+                   JOIN youtube_accounts a ON a.id = p.account_id
+                   JOIN rendered_clips r ON r.id = p.rendered_clip_id
+                   JOIN source_videos v ON v.id = r.source_video_id
+                   JOIN channels c ON c.id = v.channel_id
+                   ORDER BY p.created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def uploads_started_today(self) -> int:
+        day = datetime.now(timezone.utc).date().isoformat()
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS count FROM publish_jobs
+                   WHERE substr(created_at, 1, 10) = ? AND status != ?""",
+                (day, PublishStatus.CANCELLED.value),
+            ).fetchone()
+        return int(row["count"])
+
+    def has_active_for_account(self, account_id: int) -> bool:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM publish_jobs WHERE account_id = ? AND status IN (?, ?) LIMIT 1",
+                (account_id, *self.ACTIVE),
+            ).fetchone()
+        return row is not None
+
+    def update(
+        self,
+        job_id: str,
+        status: PublishStatus,
+        progress: float,
+        *,
+        remote_video_id: str | None = None,
+        error: str | None = None,
+        increment_attempts: bool = False,
+    ) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """UPDATE publish_jobs SET status = ?, progress = ?,
+                   remote_video_id = COALESCE(?, remote_video_id),
+                   error = ?,
+                   attempts = attempts + ?, updated_at = ? WHERE id = ?""",
+                (
+                    status.value, max(0.0, min(1.0, progress)), remote_video_id,
+                    error, int(increment_attempts), utc_now(), job_id,
+                ),
+            )
+
+    def cancel(self, job_id: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """UPDATE publish_jobs SET status = ?, error = NULL, updated_at = ?
+                   WHERE id = ? AND status IN (?, ?)""",
+                (
+                    PublishStatus.CANCELLED.value, utc_now(), job_id,
+                    PublishStatus.QUEUED.value, PublishStatus.FAILED.value,
+                ),
+            )
+
+    def retry(self, job_id: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """UPDATE publish_jobs SET status = ?, progress = 0, error = NULL, updated_at = ?
+                   WHERE id = ? AND status = ?""",
+                (PublishStatus.QUEUED.value, utc_now(), job_id, PublishStatus.FAILED.value),
+            )
+
+    def recover_interrupted(self) -> int:
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """UPDATE publish_jobs SET status = ?, progress = 0, error = NULL, updated_at = ?
+                   WHERE status = ?""",
+                (PublishStatus.QUEUED.value, utc_now(), PublishStatus.UPLOADING.value),
             )
         return cursor.rowcount
 
@@ -424,5 +659,7 @@ class Repositories:
         self.jobs = JobRepository(database)
         self.candidates = CandidateRepository(database)
         self.clips = ClipRepository(database)
+        self.youtube_accounts = YouTubeAccountRepository(database)
+        self.publish = PublishRepository(database)
         self.usage = UsageRepository(database)
         self.activity = ActivityRepository(database)

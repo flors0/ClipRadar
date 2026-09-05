@@ -75,6 +75,7 @@ class AnalysisPipeline:
                 raise GeminiError("No Gemini API key is configured. Open Settings → AI.")
             self.repos.usage.add(videos=1, source_minutes=duration / 60)
             ai_settings = self.settings.ai()
+            publishing_settings = self.settings.publishing()
             ranked: list[ClipCandidate] = []
             max_outputs = min(clip_settings.max_clips_per_video, limits.max_clips_per_video)
             for index, candidate in enumerate(candidates):
@@ -102,6 +103,8 @@ class AnalysisPipeline:
                         minimum_duration=clip_settings.minimum_duration,
                         maximum_duration=clip_settings.maximum_duration,
                         temperature=ai_settings.temperature,
+                        description_style=publishing_settings.description_style,
+                        metadata_language=publishing_settings.metadata_language,
                     )
                 finally:
                     if not self.settings.storage().keep_candidate_previews:
@@ -113,12 +116,32 @@ class AnalysisPipeline:
                     estimated_cost_eur=result.estimated_cost_eur - reserve,
                 )
                 self.repos.candidates.apply_ai_result(
-                    int(candidate.id), result.score, result.reason, result.refined_start, result.refined_end
+                    int(candidate.id), result.score, result.reason, result.refined_start, result.refined_end,
+                    title=result.title,
+                    description=result.description,
+                    tags=list(result.tags),
+                    reframe_mode=result.reframe_mode,
+                    focus_x=result.focus_x,
+                    focus_y=result.focus_y,
+                    facecam_x=result.facecam_x,
+                    facecam_y=result.facecam_y,
+                    facecam_width=result.facecam_width,
+                    facecam_height=result.facecam_height,
                 )
                 candidate.ai_score = result.score
                 candidate.ai_reason = result.reason
                 candidate.refined_start_seconds = result.refined_start
                 candidate.refined_end_seconds = result.refined_end
+                candidate.ai_title = result.title
+                candidate.ai_description = result.description
+                candidate.ai_tags = list(result.tags)
+                candidate.reframe_mode = result.reframe_mode
+                candidate.focus_x = result.focus_x
+                candidate.focus_y = result.focus_y
+                candidate.facecam_x = result.facecam_x
+                candidate.facecam_y = result.facecam_y
+                candidate.facecam_width = result.facecam_width
+                candidate.facecam_height = result.facecam_height
                 if result.score >= ai_settings.minimum_ai_score and not self._overlaps_selected(candidate, ranked):
                     ranked.append(candidate)
 
@@ -166,7 +189,7 @@ class AnalysisPipeline:
 
     def _ensure_download(self, source: SourceVideo) -> tuple[SourceVideo, Path | None]:
         if source.local_path and Path(source.local_path).exists():
-            media = probe_media(source.local_path)
+            probe_media(source.local_path)
             info_files = list(Path(source.local_path).parent.glob("*.info.json"))
             return source, info_files[0] if info_files else None
         remote = self.youtube.resolve_video(source.url)

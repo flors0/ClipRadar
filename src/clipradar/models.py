@@ -29,6 +29,24 @@ class ClipStatus(StrEnum):
     FAILED = "Failed"
 
 
+class ReframeMode(StrEnum):
+    AUTO = "auto"
+    FOCUS = "focus"
+    GAMING_SPLIT = "gaming_split"
+    CENTER = "center"
+    CONTAIN = "contain"
+
+
+class PublishStatus(StrEnum):
+    QUEUED = "Queued"
+    UPLOADING = "Uploading"
+    PRIVATE = "Private"
+    SCHEDULED = "Scheduled"
+    PUBLISHED = "Published"
+    FAILED = "Failed"
+    CANCELLED = "Cancelled"
+
+
 @dataclass(slots=True)
 class Channel:
     id: int | None
@@ -91,6 +109,16 @@ class ClipCandidate:
     refined_start_seconds: float | None = None
     refined_end_seconds: float | None = None
     status: str = "Detected"
+    ai_title: str = ""
+    ai_description: str = ""
+    ai_tags: list[str] = field(default_factory=list)
+    reframe_mode: str = ReframeMode.AUTO.value
+    focus_x: float = 0.5
+    focus_y: float = 0.5
+    facecam_x: float | None = None
+    facecam_y: float | None = None
+    facecam_width: float | None = None
+    facecam_height: float | None = None
 
     @property
     def render_start(self) -> float:
@@ -117,3 +145,36 @@ class RenderedClip:
     def path(self) -> Path:
         return Path(self.file_path)
 
+
+@dataclass(slots=True)
+class YouTubeAccount:
+    id: int | None
+    channel_id: str
+    channel_name: str
+    channel_url: str
+    avatar_url: str = ""
+    credential_key: str = ""
+    connected_at: str = field(default_factory=utc_now)
+    last_verified_at: str | None = None
+
+
+@dataclass(slots=True)
+class PublishJob:
+    id: str
+    rendered_clip_id: int
+    account_id: int
+    title: str
+    description: str
+    tags: list[str]
+    category_id: str
+    privacy_status: str
+    made_for_kids: bool
+    notify_subscribers: bool
+    scheduled_for: str | None
+    status: PublishStatus = PublishStatus.QUEUED
+    progress: float = 0.0
+    remote_video_id: str | None = None
+    error: str | None = None
+    attempts: int = 0
+    created_at: str = field(default_factory=utc_now)
+    updated_at: str = field(default_factory=utc_now)

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCloseEvent, QIcon
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QProgressBar,
     QStackedWidget,
@@ -24,6 +23,7 @@ from clipradar.app.services import AppServices
 from clipradar.ui.common import muted_label
 from clipradar.ui.pages.channels import ChannelsPage
 from clipradar.ui.pages.dashboard import DashboardPage
+from clipradar.ui.pages.publishing import PublishingPage
 from clipradar.ui.pages.review import ReviewPage
 from clipradar.ui.pages.settings import SettingsPage
 
@@ -32,7 +32,8 @@ PAGE_INFO = [
     ("Dashboard", "A quiet overview of monitoring, processing, and review."),
     ("Channels", "Choose sources and trigger focused analysis."),
     ("Review", "Watch each finished clip and make one clear decision."),
-    ("Settings", "Control defaults, AI access, budget, and storage."),
+    ("Publishing", "Track uploads and scheduled YouTube releases."),
+    ("Settings", "Control defaults, AI access, publishing, budget, and storage."),
 ]
 
 
@@ -80,7 +81,7 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons: list[QPushButton] = []
-        icons = ["⌂", "◉", "▶", "⚙"]
+        icons = ["⌂", "◉", "▶", "↑", "⚙"]
         for index, ((title, _), icon) in enumerate(zip(PAGE_INFO, icons, strict=True)):
             button = QPushButton(f"{icon}    {title}")
             button.setObjectName("NavButton")
@@ -92,7 +93,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.1.0")
+        version = QLabel("v0.2.0")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -123,9 +124,10 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.dashboard = DashboardPage(self.services.repositories)
         self.channels = ChannelsPage(self.services.repositories.channels)
-        self.review = ReviewPage(self.services.repositories.clips)
-        self.settings = SettingsPage(self.services.settings, self.services.paths)
-        for page in (self.dashboard, self.channels, self.review, self.settings):
+        self.review = ReviewPage(self.services.repositories.clips, self.services.publishing)
+        self.publishing = PublishingPage(self.services.repositories.publish)
+        self.settings = SettingsPage(self.services.settings, self.services.paths, self.services.publishing)
+        for page in (self.dashboard, self.channels, self.review, self.publishing, self.settings):
             self.pages.addWidget(page)
         content_layout.addWidget(self.pages, 1)
 
@@ -168,9 +170,26 @@ class MainWindow(QMainWindow):
         self.review.approve_requested.connect(self._approve)
         self.review.reject_requested.connect(self._reject)
         self.review.regenerate_requested.connect(self._regenerate)
+        self.review.publish_requested.connect(self._publish)
+        self.publishing.retry_requested.connect(self._retry_publish)
+        self.publishing.cancel_requested.connect(self._cancel_publish)
         self.settings.saved.connect(self._toast)
         self.settings.failed.connect(lambda message: self._toast(message, error=True))
         self.settings.test_ai_requested.connect(self._test_ai)
+        self.settings.youtube_client_import_requested.connect(
+            lambda path: self._background(
+                "youtube_import", lambda: self.services.publishing.import_client_file(path)
+            )
+        )
+        self.settings.youtube_connect_requested.connect(
+            lambda: self._background("youtube_connect", self.services.publishing.connect_account)
+        )
+        self.settings.youtube_verify_requested.connect(
+            lambda account_id: self._background(
+                "youtube_verify", lambda: self.services.publishing.verify_account(account_id)
+            )
+        )
+        self.settings.youtube_disconnect_requested.connect(self._disconnect_youtube)
         self.coordinator.task_succeeded.connect(self._task_succeeded)
         self.coordinator.task_failed.connect(self._task_failed)
         self.coordinator.data_changed.connect(self.refresh_all)
@@ -180,6 +199,7 @@ class MainWindow(QMainWindow):
         self.dashboard.refresh()
         self.channels.refresh()
         self.review.refresh()
+        self.publishing.refresh()
 
     def _set_page(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
@@ -189,6 +209,10 @@ class MainWindow(QMainWindow):
         self.nav_buttons[index].setChecked(True)
         if index == 2:
             self.review.refresh()
+        elif index == 3:
+            self.publishing.refresh()
+        elif index == 4:
+            self.settings.refresh_publishing()
 
     def _background(self, key: str, operation: Callable[[], object]) -> None:
         if not self.coordinator.execute(key, operation):
@@ -225,9 +249,46 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._toast(str(exc), error=True)
 
-    def _regenerate(self, clip_id: int) -> None:
-        if self.coordinator.regenerate(clip_id):
+    def _regenerate(self, clip_id: int, reframe_mode: str) -> None:
+        if self.coordinator.regenerate(clip_id, reframe_mode):
             self._toast("Regenerating clip…")
+
+    def _publish(self, clip_id: int, metadata: dict) -> None:
+        try:
+            self.services.publishing.queue_clip(clip_id=clip_id, **metadata)
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+            return
+        self.refresh_all()
+        self._set_page(3)
+        self._toast("Upload queued" if not metadata.get("scheduled_for") else "Scheduled upload queued")
+
+    def _retry_publish(self, job_id: str) -> None:
+        try:
+            self.services.publishing.retry(job_id)
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+        else:
+            self.refresh_all()
+            self._toast("Upload queued again")
+
+    def _cancel_publish(self, job_id: str) -> None:
+        try:
+            self.services.publishing.cancel(job_id)
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+        else:
+            self.refresh_all()
+            self._toast("Publishing job cancelled")
+
+    def _disconnect_youtube(self, account_id: int) -> None:
+        try:
+            self.services.publishing.disconnect_account(account_id)
+        except Exception as exc:
+            self.settings.finish_youtube_action(str(exc), False)
+        else:
+            self.settings.finish_youtube_action("YouTube channel disconnected", True)
+            self.refresh_all()
 
     def _test_ai(self, key: str, model: str) -> None:
         self._background("ai_test", lambda: self.services.gemini.test_connection(key, model))
@@ -242,6 +303,13 @@ class MainWindow(QMainWindow):
             self._toast(f"Added {getattr(result, 'name', 'channel')}")
         elif key == "ai_test":
             self.settings.set_connection_status(str(result), True)
+        elif key in {"youtube_import", "youtube_verify"}:
+            self.settings.finish_youtube_action(str(result), True)
+            self._toast(str(result))
+        elif key == "youtube_connect":
+            name = getattr(result, "channel_name", "YouTube channel")
+            self.settings.finish_youtube_action(f"Connected · {name}", True)
+            self._toast(f"Connected {name}")
         elif key == "pipeline":
             self.pipeline_progress.hide()
             self.pipeline_text.setText("No active job")
@@ -251,6 +319,11 @@ class MainWindow(QMainWindow):
             self._toast("New render ready for review")
         elif key.startswith(("latest:", "specific:")):
             self._toast("Analysis queued")
+        elif key == "publishing":
+            self.pipeline_progress.hide()
+            self.pipeline_text.setText("No active job")
+            self.sidebar_status.setText("●  Ready")
+            self._toast("YouTube upload complete")
         else:
             self._toast("Saved")
         self.refresh_all()
@@ -263,9 +336,17 @@ class MainWindow(QMainWindow):
         elif key == "ai_test":
             self.settings.set_connection_status(message, False)
             return
+        elif key in {"youtube_import", "youtube_connect", "youtube_verify"}:
+            self.settings.finish_youtube_action(message, False)
+            self._toast(message, error=True)
+            return
         elif key == "pipeline":
             self.pipeline_progress.hide()
             self.pipeline_text.setText("Last job failed")
+            self.sidebar_status.setText("●  Attention needed")
+        elif key == "publishing":
+            self.pipeline_progress.hide()
+            self.pipeline_text.setText("Last upload failed")
             self.sidebar_status.setText("●  Attention needed")
         self._toast(message, error=True)
         self.refresh_all()

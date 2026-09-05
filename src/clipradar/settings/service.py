@@ -11,6 +11,7 @@ from clipradar.settings.models import (
     ClipSettings,
     GeneralSettings,
     MonitoringSettings,
+    PublishingSettings,
     StorageSettings,
     merge_dataclass,
 )
@@ -55,6 +56,9 @@ class SettingsService:
     def storage(self) -> StorageSettings:
         return merge_dataclass(StorageSettings, self._read("storage"))
 
+    def publishing(self) -> PublishingSettings:
+        return merge_dataclass(PublishingSettings, self._read("publishing"))
+
     def save_general(self, value: GeneralSettings) -> None:
         self._write("general", value)
 
@@ -81,3 +85,9 @@ class SettingsService:
     def save_storage(self, value: StorageSettings) -> None:
         self._write("storage", value)
 
+    def save_publishing(self, value: PublishingSettings) -> None:
+        if value.max_uploads_per_day < 1 or value.max_uploads_per_day > 100:
+            raise ValueError("YouTube uploads/day must be between 1 and 100.")
+        if value.default_privacy not in {"Private", "Unlisted", "Public"}:
+            raise ValueError("Select a valid default YouTube visibility.")
+        self._write("publishing", value)

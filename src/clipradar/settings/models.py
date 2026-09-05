@@ -28,7 +28,7 @@ class ClipSettings:
     output_format: str = "Vertical 9:16"
     render_width: int = 1080
     render_height: int = 1920
-    captions_enabled: bool = True
+    captions_enabled: bool = False
     word_highlighting: bool = False
     audio_normalization: bool = True
 
@@ -56,6 +56,19 @@ class StorageSettings:
     keep_candidate_previews: bool = False
 
 
+@dataclass(slots=True)
+class PublishingSettings:
+    timezone: str = "Europe/Berlin"
+    description_style: str = "Auto"
+    metadata_language: str = "Auto"
+    default_privacy: str = "Private"
+    category_id: str = "20"
+    made_for_kids: bool = False
+    notify_subscribers: bool = False
+    max_uploads_per_day: int = 10
+    default_tags: str = ""
+
+
 T = TypeVar("T")
 
 
@@ -64,4 +77,3 @@ def merge_dataclass(cls: type[T], value: dict[str, Any] | None) -> T:
     if value:
         defaults.update({key: item for key, item in value.items() if key in defaults})
     return cls(**defaults)
-

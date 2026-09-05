@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -34,6 +35,16 @@ class ClipEvaluation(BaseModel):
     end_offset_seconds: float = Field(ge=0)
     works_without_context: bool
     hook: str = Field(default="", max_length=140)
+    title: str = ""
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    reframe_mode: Literal["focus", "gaming_split", "center", "contain"] = "focus"
+    focus_x: int = Field(default=500, ge=0, le=1000)
+    focus_y: int = Field(default=500, ge=0, le=1000)
+    facecam_x: int = Field(default=0, ge=0, le=1000)
+    facecam_y: int = Field(default=0, ge=0, le=1000)
+    facecam_width: int = Field(default=0, ge=0, le=1000)
+    facecam_height: int = Field(default=0, ge=0, le=1000)
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +56,16 @@ class EvaluationResult:
     input_tokens: int
     output_tokens: int
     estimated_cost_eur: float
+    title: str = ""
+    description: str = ""
+    tags: tuple[str, ...] = ()
+    reframe_mode: str = "focus"
+    focus_x: float = 0.5
+    focus_y: float = 0.5
+    facecam_x: float | None = None
+    facecam_y: float | None = None
+    facecam_width: float | None = None
+    facecam_height: float | None = None
 
 
 class GeminiClient:
@@ -72,6 +93,8 @@ class GeminiClient:
         minimum_duration: float,
         maximum_duration: float,
         temperature: float,
+        description_style: str = "Auto",
+        metadata_language: str = "Auto",
     ) -> EvaluationResult:
         preview_path = Path(preview_path)
         if not api_key.strip():
@@ -79,7 +102,13 @@ class GeminiClient:
         data = preview_path.read_bytes()
         if len(data) > 19 * 1024 * 1024:
             raise GeminiError("Candidate preview exceeds the safe inline upload limit.")
-        prompt = self._prompt(candidate, minimum_duration, maximum_duration)
+        prompt = self._prompt(
+            candidate,
+            minimum_duration,
+            maximum_duration,
+            description_style,
+            metadata_language,
+        )
         try:
             from google import genai
             from google.genai import types
@@ -89,7 +118,7 @@ class GeminiClient:
                 response_mime_type="application/json",
                 response_schema=ClipEvaluation,
                 temperature=max(0.0, min(1.0, temperature)),
-                max_output_tokens=500,
+                max_output_tokens=1400,
             )
             with genai.Client(api_key=api_key.strip()) as client:
                 response = client.models.generate_content(model=model, contents=[prompt, part], config=config)
@@ -117,6 +146,10 @@ class GeminiClient:
         reason = evaluation.reason.strip()
         if evaluation.hook.strip():
             reason = f"{reason} · Hook: {evaluation.hook.strip()}"
+        title = _clean_title(evaluation.title or evaluation.hook)
+        description = _clean_description(evaluation.description)
+        tags = tuple(_clean_tags(evaluation.tags))
+        facecam = _normalize_facecam(evaluation)
         return EvaluationResult(
             score=evaluation.score,
             reason=reason[:420],
@@ -125,11 +158,35 @@ class GeminiClient:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+            title=title,
+            description=description,
+            tags=tags,
+            reframe_mode=evaluation.reframe_mode,
+            focus_x=evaluation.focus_x / 1000,
+            focus_y=evaluation.focus_y / 1000,
+            facecam_x=facecam[0],
+            facecam_y=facecam[1],
+            facecam_width=facecam[2],
+            facecam_height=facecam[3],
         )
 
     @staticmethod
-    def _prompt(candidate: ClipCandidate, minimum_duration: float, maximum_duration: float) -> str:
+    def _prompt(
+        candidate: ClipCandidate,
+        minimum_duration: float,
+        maximum_duration: float,
+        description_style: str,
+        metadata_language: str,
+    ) -> str:
         excerpt = str(candidate.signals.get("transcript_excerpt", ""))
+        style = {
+            "Short": "Write a concise one- or two-sentence description.",
+            "Detailed": (
+                "Write a substantial, unique description of roughly 500-1200 characters. Keep every part "
+                "relevant to this clip; use the first two lines for the clearest hook and context."
+            ),
+        }.get(description_style, "Choose a concise or detailed description based on what genuinely fits the clip.")
+        language = "Use the spoken language of the clip." if metadata_language == "Auto" else f"Write metadata in {metadata_language}."
         return f"""You are selecting one excellent short-form social video moment.
 Watch the entire attached candidate. Score it for humor, surprise, emotion, a strong reaction,
 a clear payoff, understandable context, and suitability for YouTube Shorts/TikTok.
@@ -138,6 +195,20 @@ Quality matters more than quantity. A mediocre but usable moment should score be
 Return offsets relative to the beginning of this attached candidate, not source-video timestamps.
 Choose natural sentence/reaction boundaries. Keep the final duration between {minimum_duration:.0f}
 and {maximum_duration:.0f} seconds whenever possible, but never cut off the payoff.
+
+Also create upload metadata that truthfully matches this exact clip:
+- one compelling YouTube Shorts title, maximum 100 characters;
+- one unique description. {style}
+- 6-15 specific search tags, without # characters or duplicates.
+{language}
+Do not use unrelated filler, keyword stuffing, fake claims, or random foreign-language text.
+
+Choose how a vertical 9:16 render should frame the attached horizontal video. Coordinates use a
+0-1000 grid over the full source frame. focus_x/focus_y mark the most important visual point for
+the entire clip, considering the reaction, speaker, gameplay action, and context rather than blindly
+choosing the geometric center. Use gaming_split only when both a small facecam and separate gameplay
+area are important. For gaming_split, return the facecam rectangle and use focus_x/focus_y for the
+important gameplay area. Use contain when cropping would destroy essential wide context.
 
 Local transcript (may contain errors): {excerpt or '[not available]'}
 Local signal score: {candidate.local_score:.1f}/100
@@ -170,3 +241,46 @@ def estimate_cost_eur(model: str, input_tokens: int, output_tokens: int) -> floa
         input_usd, output_usd = 0.60, 3.50
     usd = input_tokens / 1_000_000 * input_usd + output_tokens / 1_000_000 * output_usd
     return round(usd * 0.95, 6)
+
+
+def _clean_title(value: str) -> str:
+    return " ".join(value.replace("\n", " ").split())[:100].strip()
+
+
+def _clean_description(value: str) -> str:
+    lines = [" ".join(line.split()) for line in value.replace("\r", "").split("\n")]
+    cleaned = "\n".join(line for line in lines if line).strip()
+    return cleaned[:5000]
+
+
+def _clean_tags(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for raw in values:
+        tag = " ".join(str(raw).replace("#", " ").split()).strip(" ,")[:60]
+        key = tag.casefold()
+        if not tag or key in seen:
+            continue
+        projected = total + len(tag) + (1 if result else 0)
+        if projected > 450:
+            break
+        seen.add(key)
+        result.append(tag)
+        total = projected
+        if len(result) >= 15:
+            break
+    return result
+
+
+def _normalize_facecam(evaluation: ClipEvaluation) -> tuple[float | None, float | None, float | None, float | None]:
+    values = (
+        evaluation.facecam_x / 1000,
+        evaluation.facecam_y / 1000,
+        evaluation.facecam_width / 1000,
+        evaluation.facecam_height / 1000,
+    )
+    x, y, width, height = values
+    if width < 0.06 or height < 0.06 or x + width > 1.01 or y + height > 1.01:
+        return None, None, None, None
+    return x, y, width, height

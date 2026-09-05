@@ -2,9 +2,9 @@
 
 ClipRadar is a local-first Windows desktop workflow for turning new YouTube uploads into a small number of ranked, edited short-form clips:
 
-`Channel → upload detection → local candidates → Gemini ranking → 9:16 render → review`
+`Channel → upload detection → local candidates → Gemini ranking + metadata + framing → 9:16 render → review → YouTube`
 
-The first usable version deliberately stops at the review queue. Publishing is isolated as the next module instead of weakening the core workflow.
+Publishing remains approval-driven: nothing is uploaded until a user confirms the final clip and its metadata.
 
 ## What works
 
@@ -18,14 +18,29 @@ The first usable version deliberately stops at the review queue. Publishing is i
 - Send only compressed candidate previews to the selected Gemini model.
 - Apply hard daily limits for videos, source minutes, clips, and estimated AI cost.
 - De-duplicate overlapping moments and render only the best candidates.
-- Render 9:16 H.264 MP4 with face-biased reframing, burned captions, and loudness normalization.
+- Ask Gemini for the important scene focus and choose a subject crop, context-preserving frame, or facecam-plus-gameplay layout.
+- Render 9:16 H.264 MP4 with scene-aware reframing and loudness normalization. Burned captions are disabled by default.
+- Generate a relevant YouTube title, description, and tags for every newly analyzed candidate.
 - Preview, approve, reject, regenerate, open, or trace a clip back to its source in the review queue.
+- Edit Gemini metadata, upload immediately, or choose a scheduled public release from the review flow.
+- Persist upload progress, safely recover interrupted uploads, and track results in a compact publishing queue.
 - Recover interrupted jobs safely after an application restart.
 - Build and smoke-test a bundled Windows EXE through GitHub Actions.
 
 ## Security
 
-The Gemini API key is entered only through **Settings → AI**. It is stored through `keyring`; on Windows this uses the operating-system credential vault. The key is never stored in SQLite, project files, logs, Git, or the executable. Model and non-secret AI settings are stored in SQLite.
+The Gemini API key is entered only through **Settings → AI**. The Google OAuth client, refresh tokens, and resumable upload sessions are also stored through `keyring`; on Windows this uses the operating-system credential vault. These secrets are never stored in SQLite, project files, logs, Git, or the executable. Model, metadata, scheduling, and other non-secret settings are stored in SQLite.
+
+## Connect YouTube for publishing
+
+1. In Google Cloud, enable **YouTube Data API v3** for a project.
+2. Configure its OAuth consent screen. While the app is in testing, add the Google account you will use as a test user.
+3. Create an OAuth client with application type **Desktop app** and download its JSON file.
+4. In ClipRadar, open **Settings → Publishing**, choose **Import OAuth JSON**, then **Connect YouTube**.
+5. Complete Google sign-in in the browser and verify the displayed channel with **Test**.
+6. In **Review**, select **Publish…** to edit Gemini's title, description, and tags, then upload now or schedule a public release.
+
+Scheduled clips are uploaded as private first. YouTube owns the future release, so ClipRadar does not need to remain open after the upload completes. The local daily upload limit is configurable and defaults to 10.
 
 ## Run from source on Windows
 
@@ -59,7 +74,7 @@ python -m pytest -q
 python -m clipradar --self-test
 ```
 
-Tests cover persistence, secure-secret separation, channel baseline and upload scheduling, local candidate selection, real FFmpeg rendering, a deterministic full pipeline through the review queue, UI navigation, and the packaged executable.
+Tests cover persistence and migration, secure-secret separation, channel baseline and analysis scheduling, local candidate selection, Gemini's structured metadata/framing schema, real FFmpeg focus and gaming-split rendering, the full pipeline through review, mocked resumable YouTube upload/scheduling, UI navigation, and the packaged executable.
 
 ## Runtime data
 
@@ -67,4 +82,4 @@ ClipRadar keeps its database, downloads, candidate previews, logs, and output in
 
 ## Architecture
 
-The code is split by responsibility under `src/clipradar/`: `channels`, `monitoring`, `jobs`, `youtube`, `media`, `analysis`, `ai`, `rendering`, `review`, `settings`, `storage`, and `ui`. Network, Gemini, download, detection, and rendering operations run in a background executor; Qt's UI thread only coordinates and displays state.
+The code is split by responsibility under `src/clipradar/`: `channels`, `monitoring`, `jobs`, `youtube`, `media`, `analysis`, `ai`, `rendering`, `review`, `publishing`, `settings`, `storage`, and `ui`. Network, Gemini, download, detection, rendering, OAuth, and upload operations run in a background executor; Qt's UI thread only coordinates and displays state.

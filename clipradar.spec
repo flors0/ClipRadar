@@ -15,6 +15,11 @@ for executable in ("ffmpeg.exe", "ffprobe.exe"):
 hiddenimports = (
     collect_submodules("keyring.backends")
     + collect_submodules("google.genai")
+    + collect_submodules("googleapiclient")
+    + collect_submodules("google_auth_oauthlib")
+    + collect_submodules("google.oauth2")
+    + collect_submodules("google_auth_httplib2")
+    + collect_submodules("requests_oauthlib")
     + ["cv2", "yt_dlp", "yt_dlp.compat._legacy", "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"]
 )
 

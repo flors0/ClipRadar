@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+*.egg-info/
 .coverage
 htmlcov/
 build/
@@ -16,6 +17,7 @@ dist/
 runtime/
 output/
 downloads/
+ui-preview*.png
 vendor/bin/*.exe
 vendor/bin/ffmpeg
 vendor/bin/ffprobe

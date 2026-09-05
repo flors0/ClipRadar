@@ -3,6 +3,7 @@
     color: #f2f5f3;
 }
 QMainWindow, QWidget#AppRoot { background: #060807; }
+QDialog, QMessageBox { background: #0d1110; }
 QWidget { background: transparent; }
 QFrame#Sidebar { background: #090c0b; border-right: 1px solid #202622; }
 QLabel#Brand { font-size: 21px; font-weight: 700; }
@@ -19,6 +20,11 @@ QFrame#Card, QFrame#MetricCard, QFrame#Toolbar, QFrame#Toast {
     background: #0d1110;
     border: 1px solid #242b27;
     border-radius: 12px;
+}
+QFrame#InsetCard {
+    background: #090c0b;
+    border: 1px solid #202722;
+    border-radius: 10px;
 }
 QFrame#MetricCard:hover, QFrame#ChannelCard:hover, QFrame#ReviewCard:hover { border-color: #38433d; }
 QFrame#ChannelCard, QFrame#ReviewCard {
@@ -59,7 +65,7 @@ QPushButton#NavButton:checked {
     background: #151b17;
     border-color: #2a322d;
 }
-QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {
     min-height: 40px;
     padding: 0 12px;
     background: #090c0b;
@@ -67,7 +73,8 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
     border-radius: 9px;
     selection-background-color: #8db400;
 }
-QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: #8bae17; }
+QPlainTextEdit { padding: 9px 12px; }
+QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus { border-color: #8bae17; }
 QComboBox::drop-down { border: none; width: 30px; }
 QComboBox QAbstractItemView { background: #111512; border: 1px solid #333c36; selection-background-color: #29321c; }
 QCheckBox { spacing: 9px; color: #d8ddda; }

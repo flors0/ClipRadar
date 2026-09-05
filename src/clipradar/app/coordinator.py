@@ -50,9 +50,9 @@ class BackgroundCoordinator(QObject):
         if self.execute("monitoring", self.services.monitoring.check_now):
             self._last_monitor_check = time.monotonic()
 
-    def regenerate(self, clip_id: int) -> bool:
+    def regenerate(self, clip_id: int, reframe_mode: str | None = None) -> bool:
         try:
-            candidate_id = self.services.review.prepare_regeneration(clip_id)
+            candidate_id = self.services.review.prepare_regeneration(clip_id, reframe_mode)
         except Exception as exc:
             self.task_failed.emit(f"regenerate:{clip_id}", str(exc))
             return False
@@ -72,6 +72,13 @@ class BackgroundCoordinator(QObject):
                     "pipeline",
                     lambda: self.services.pipeline.run(job.id, self._emit_progress),
                 )
+        if "publishing" not in self.running:
+            publish_job = self.services.repositories.publish.next_queued()
+            if publish_job:
+                self.execute(
+                    "publishing",
+                    lambda: self.services.publishing.upload(publish_job.id, self._emit_progress),
+                )
 
     def _emit_progress(self, stage: str, value: float) -> None:
         self.job_progress.emit(stage, value)
@@ -86,4 +93,3 @@ class BackgroundCoordinator(QObject):
         else:
             self.task_succeeded.emit(key, result)
         self.data_changed.emit()
-

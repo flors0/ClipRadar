@@ -9,6 +9,11 @@ from pathlib import Path
 SECRET_PATTERNS = [
     re.compile(r"AIza[0-9A-Za-z_-]{20,}"),
     re.compile(r"AQ\.[0-9A-Za-z_-]{20,}"),
+    re.compile(r"ya29\.[0-9A-Za-z._-]{12,}"),
+    re.compile(r"1//[0-9A-Za-z._-]{12,}"),
+    re.compile(
+        r"(?i)(?:access_token|refresh_token|client_secret)\s*[:=]\s*[\"']?[^\"',\s&}]{6,}"
+    ),
 ]
 
 
@@ -28,4 +33,3 @@ def configure_logging(root: Path) -> None:
     handler.addFilter(RedactingFilter())
     handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.basicConfig(level=logging.INFO, handlers=[handler])
-

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 SCHEMA = """
@@ -73,7 +74,17 @@ CREATE TABLE IF NOT EXISTS clip_candidates (
     ai_reason TEXT NOT NULL DEFAULT '',
     refined_start_seconds REAL,
     refined_end_seconds REAL,
-    status TEXT NOT NULL DEFAULT 'Detected'
+    status TEXT NOT NULL DEFAULT 'Detected',
+    ai_title TEXT NOT NULL DEFAULT '',
+    ai_description TEXT NOT NULL DEFAULT '',
+    ai_tags_json TEXT NOT NULL DEFAULT '[]',
+    reframe_mode TEXT NOT NULL DEFAULT 'auto',
+    focus_x REAL NOT NULL DEFAULT 0.5,
+    focus_y REAL NOT NULL DEFAULT 0.5,
+    facecam_x REAL,
+    facecam_y REAL,
+    facecam_width REAL,
+    facecam_height REAL
 );
 
 CREATE TABLE IF NOT EXISTS rendered_clips (
@@ -89,6 +100,41 @@ CREATE TABLE IF NOT EXISTS rendered_clips (
 );
 
 CREATE INDEX IF NOT EXISTS idx_clips_status ON rendered_clips(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS youtube_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id TEXT NOT NULL UNIQUE,
+    channel_name TEXT NOT NULL,
+    channel_url TEXT NOT NULL,
+    avatar_url TEXT NOT NULL DEFAULT '',
+    credential_key TEXT NOT NULL UNIQUE,
+    connected_at TEXT NOT NULL,
+    last_verified_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS publish_jobs (
+    id TEXT PRIMARY KEY,
+    rendered_clip_id INTEGER NOT NULL REFERENCES rendered_clips(id) ON DELETE CASCADE,
+    account_id INTEGER NOT NULL REFERENCES youtube_accounts(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    tags_json TEXT NOT NULL DEFAULT '[]',
+    category_id TEXT NOT NULL DEFAULT '20',
+    privacy_status TEXT NOT NULL DEFAULT 'private',
+    made_for_kids INTEGER NOT NULL DEFAULT 0,
+    notify_subscribers INTEGER NOT NULL DEFAULT 0,
+    scheduled_for TEXT,
+    status TEXT NOT NULL DEFAULT 'Queued',
+    progress REAL NOT NULL DEFAULT 0,
+    remote_video_id TEXT,
+    error TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(rendered_clip_id, account_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_publish_jobs_status ON publish_jobs(status, created_at);
 
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
@@ -129,6 +175,41 @@ class Database:
                 connection.execute("INSERT INTO schema_info(version) VALUES (?)", (SCHEMA_VERSION,))
             elif row["version"] > SCHEMA_VERSION:
                 raise RuntimeError("This database was created by a newer ClipRadar version.")
+            elif row["version"] < SCHEMA_VERSION:
+                self._migrate(connection, int(row["version"]))
+
+    def _migrate(self, connection: sqlite3.Connection, version: int) -> None:
+        if version < 2:
+            existing = {row["name"] for row in connection.execute("PRAGMA table_info(clip_candidates)")}
+            additions = {
+                "ai_title": "TEXT NOT NULL DEFAULT ''",
+                "ai_description": "TEXT NOT NULL DEFAULT ''",
+                "ai_tags_json": "TEXT NOT NULL DEFAULT '[]'",
+                "reframe_mode": "TEXT NOT NULL DEFAULT 'auto'",
+                "focus_x": "REAL NOT NULL DEFAULT 0.5",
+                "focus_y": "REAL NOT NULL DEFAULT 0.5",
+                "facecam_x": "REAL",
+                "facecam_y": "REAL",
+                "facecam_width": "REAL",
+                "facecam_height": "REAL",
+            }
+            for name, declaration in additions.items():
+                if name not in existing:
+                    connection.execute(f"ALTER TABLE clip_candidates ADD COLUMN {name} {declaration}")
+
+            row = connection.execute("SELECT value_json FROM settings WHERE key = 'clips'").fetchone()
+            if row:
+                try:
+                    payload = json.loads(row["value_json"])
+                    payload["captions_enabled"] = False
+                    payload["word_highlighting"] = False
+                    connection.execute(
+                        "UPDATE settings SET value_json = ? WHERE key = 'clips'",
+                        (json.dumps(payload, separators=(",", ":")),),
+                    )
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+        connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
@@ -146,4 +227,3 @@ class Database:
             raise
         finally:
             connection.close()
-
