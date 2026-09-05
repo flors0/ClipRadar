@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -201,7 +202,7 @@ class ReviewPage(QWidget):
         root.addWidget(splitter)
 
         left, left_layout = card_layout(object_name="Card")
-        left.setMinimumWidth(300)
+        left.setMinimumWidth(260)
         header = QHBoxLayout()
         header.addWidget(title_label("Ready for review"))
         header.addStretch(1)
@@ -216,7 +217,7 @@ class ReviewPage(QWidget):
         splitter.addWidget(left)
 
         right, right_layout = card_layout(object_name="Card")
-        right.setMinimumWidth(560)
+        right.setMinimumWidth(480)
         preview_header = QHBoxLayout()
         preview_header.addWidget(title_label("Preview"))
         preview_header.addStretch(1)
@@ -275,24 +276,26 @@ class ReviewPage(QWidget):
         edit_row.addWidget(self.regenerate)
         right_layout.addLayout(edit_row)
 
-        actions = QHBoxLayout()
         self.reject = QPushButton("Reject")
         self.reject.setObjectName("DangerButton")
-        self.open_file = QPushButton("Open file")
-        self.open_source = QPushButton("Open source")
+        self.more = QPushButton("More")
+        more_menu = QMenu(self.more)
+        self.open_source = more_menu.addAction("Open source")
+        self.open_file = more_menu.addAction("Open file location")
+        self.more.setMenu(more_menu)
         self.approve = QPushButton("Approve only")
         self.publish = QPushButton("Publish…")
         self.publish.setObjectName("PrimaryButton")
         self.reject.clicked.connect(lambda: self._emit(self.reject_requested))
         self.approve.clicked.connect(lambda: self._emit(self.approve_requested))
         self.publish.clicked.connect(self._publish)
-        self.open_file.clicked.connect(self._open_file)
-        self.open_source.clicked.connect(self._open_source)
+        self.open_file.triggered.connect(self._open_file)
+        self.open_source.triggered.connect(self._open_source)
+
+        actions = QHBoxLayout()
         actions.addWidget(self.reject)
-        actions.addWidget(self.regenerate)
+        actions.addWidget(self.more)
         actions.addStretch(1)
-        actions.addWidget(self.open_source)
-        actions.addWidget(self.open_file)
         actions.addWidget(self.approve)
         actions.addWidget(self.publish)
         right_layout.addLayout(actions)
@@ -359,6 +362,7 @@ class ReviewPage(QWidget):
         for button in (
             self.reject,
             self.regenerate,
+            self.more,
             self.open_file,
             self.open_source,
             self.approve,
