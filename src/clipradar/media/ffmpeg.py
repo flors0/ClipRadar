@@ -90,3 +90,22 @@ def create_candidate_preview(
     ], timeout=max(120, duration * 5))
     return output
 
+
+def create_framing_preview(
+    source: str | Path,
+    output: str | Path,
+    start: float,
+    end: float,
+) -> Path:
+    """Create a small visual-only preview for comparing an existing vertical render."""
+    output = Path(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(1.0, end - start)
+    run_process([
+        bundled_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", f"{max(0, start):.3f}", "-i", str(source), "-t", f"{duration:.3f}",
+        "-vf", "fps=4,scale='min(480,iw)':-2:flags=lanczos",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "32",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(output),
+    ], timeout=max(120, duration * 5))
+    return output

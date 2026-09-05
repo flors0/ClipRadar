@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from clipradar.channels.service import ChannelService
+from clipradar.models import Channel, SourceVideo, utc_now
 from clipradar.youtube.client import RemoteVideo, ResolvedChannel
 
 
@@ -48,3 +49,21 @@ def test_manual_latest_is_queued_immediately(services):
     assert job.manual is True
     assert services.repositories.jobs.next_due() is not None
 
+
+def test_analysis_queue_has_deterministic_sequential_positions(services):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_QUEUE", "Queue Channel", "", "https://youtube.test/queue"
+    ))
+    first_source, _ = services.repositories.videos.upsert(SourceVideo(
+        None, int(channel.id), "queue-first", "First queued video", "https://youtube.test/first"
+    ))
+    second_source, _ = services.repositories.videos.upsert(SourceVideo(
+        None, int(channel.id), "queue-second", "Second queued video", "https://youtube.test/second"
+    ))
+    scheduled = utc_now()
+    first = services.repositories.jobs.create(int(first_source.id), scheduled)
+    second = services.repositories.jobs.create(int(second_source.id), scheduled)
+
+    assert services.repositories.jobs.queue_position(first.id) == 1
+    assert services.repositories.jobs.queue_position(second.id) == 2
+    assert services.repositories.jobs.next_due().id == first.id

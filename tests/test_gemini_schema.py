@@ -5,7 +5,13 @@ from types import SimpleNamespace
 import pytest
 from google.genai._transformers import t_schema
 
-from clipradar.ai.gemini import GEMINI_MODELS, ClipEvaluation, GeminiClient, GeminiError
+from clipradar.ai.gemini import (
+    GEMINI_MODELS,
+    ClipEvaluation,
+    FramingEvaluation,
+    GeminiClient,
+    GeminiError,
+)
 from clipradar.models import ClipCandidate
 
 
@@ -18,6 +24,16 @@ def test_clip_evaluation_schema_is_accepted_by_google_sdk():
     assert "tags" in schema.properties
     assert "reframe_mode" in schema.properties
     assert "focus_x" in schema.properties
+
+
+def test_framing_schema_is_accepted_by_google_sdk():
+    schema = t_schema(None, FramingEvaluation)
+
+    assert schema is not None
+    assert schema.properties is not None
+    assert "facecam_present" in schema.properties
+    assert schema.properties["focus_x"].minimum == 0
+    assert schema.properties["focus_x"].maximum == 1000
 
 
 def test_gemini_prompt_requests_editable_metadata_tags_and_scene_focus():
@@ -80,6 +96,20 @@ def _valid_payload():
     }
 
 
+def _valid_framing_payload(mode="focus"):
+    return {
+        "reason": "The relevant reaction is left of the old center crop.",
+        "reframe_mode": mode,
+        "focus_x": 270,
+        "focus_y": 440,
+        "facecam_present": mode == "gaming_split",
+        "facecam_x": 25 if mode == "gaming_split" else 0,
+        "facecam_y": 40 if mode == "gaming_split" else 0,
+        "facecam_width": 180 if mode == "gaming_split" else 0,
+        "facecam_height": 240 if mode == "gaming_split" else 0,
+    }
+
+
 def _analyze(monkeypatch, tmp_path, model, responses, events=None):
     from google import genai
 
@@ -101,6 +131,38 @@ def _analyze(monkeypatch, tmp_path, model, responses, events=None):
     return result, fake
 
 
+def _analyze_framing(monkeypatch, tmp_path, model, responses, requested_mode="focus"):
+    from google import genai
+
+    fake = _FakeClient(responses)
+    monkeypatch.setattr(genai, "Client", lambda **_kwargs: fake)
+    original = tmp_path / "original.mp4"
+    current = tmp_path / "current.mp4"
+    original.write_bytes(b"original-unit-test-video")
+    current.write_bytes(b"current-unit-test-video")
+    candidate = ClipCandidate(
+        None,
+        1,
+        10,
+        40,
+        82,
+        {},
+        reframe_mode="center",
+        focus_x=0.5,
+        focus_y=0.5,
+    )
+    result = GeminiClient().analyze_framing(
+        api_key="unit-test-key",
+        model=model,
+        original_preview_path=original,
+        current_preview_path=current,
+        requested_mode=requested_mode,
+        candidate=candidate,
+        temperature=0.2,
+    )
+    return result, fake
+
+
 @pytest.mark.parametrize("_label,model", GEMINI_MODELS)
 def test_every_selectable_model_uses_the_same_validated_output_path(monkeypatch, tmp_path, _label, model):
     result, fake = _analyze(monkeypatch, tmp_path, model, [_response(parsed=_valid_payload())])
@@ -108,6 +170,75 @@ def test_every_selectable_model_uses_the_same_validated_output_path(monkeypatch,
     assert result.request_count == 1
     assert fake.models.calls[0]["model"] == model
     assert fake.models.calls[0]["config"].max_output_tokens == 8192
+
+
+@pytest.mark.parametrize("_label,model", GEMINI_MODELS)
+def test_every_selectable_model_uses_framing_comparison_path(monkeypatch, tmp_path, _label, model):
+    result, fake = _analyze_framing(
+        monkeypatch,
+        tmp_path,
+        model,
+        [_response(parsed=_valid_framing_payload())],
+    )
+    assert result.reframe_mode == "focus"
+    assert result.focus_x == pytest.approx(0.27)
+    assert fake.models.calls[0]["model"] == model
+    assert fake.models.calls[0]["config"].max_output_tokens == 2048
+    assert len(fake.models.calls[0]["contents"]) == 3
+
+
+def test_framing_prompt_reconsiders_important_subject_and_compares_both_renders():
+    candidate = ClipCandidate(None, 1, 10, 40, 82, {}, reframe_mode="center")
+
+    prompt = GeminiClient._framing_prompt(candidate, "focus")
+
+    assert "ORIGINAL SOURCE SEGMENT" in prompt
+    assert "CURRENT\nVERTICAL RENDER" in prompt
+    assert "independently reconsider" in prompt
+    assert "geometric center" in prompt
+
+
+def test_explicit_important_subject_mode_cannot_be_changed_by_model(monkeypatch, tmp_path):
+    result, _fake = _analyze_framing(
+        monkeypatch,
+        tmp_path,
+        "gemini-3.5-flash-lite",
+        [_response(parsed=_valid_framing_payload("gaming_split"))],
+        requested_mode="focus",
+    )
+
+    assert result.reframe_mode == "focus"
+    assert result.facecam_x is None
+
+
+def test_facecam_gameplay_requires_a_real_facecam_box(monkeypatch, tmp_path):
+    payload = _valid_framing_payload("gaming_split")
+    payload.update(facecam_present=False, facecam_width=0, facecam_height=0)
+
+    with pytest.raises(GeminiError, match="could not locate a valid facecam"):
+        _analyze_framing(
+            monkeypatch,
+            tmp_path,
+            "gemini-3.5-flash-lite",
+            [_response(parsed=payload)],
+            requested_mode="gaming_split",
+        )
+
+
+def test_incomplete_framing_response_retries_with_compact_larger_budget(monkeypatch, tmp_path):
+    result, fake = _analyze_framing(
+        monkeypatch,
+        tmp_path,
+        "gemini-3.8-flash",
+        [
+            _response(text='{"reason":"unfinished', finish_reason="MAX_TOKENS", thoughts=120),
+            _response(parsed=_valid_framing_payload(), input_tokens=110, output_tokens=55),
+        ],
+    )
+
+    assert result.request_count == 2
+    assert [call["config"].max_output_tokens for call in fake.models.calls] == [2048, 4096]
+    assert fake.models.calls[1]["config"].temperature == 0
 
 
 def test_truncated_structured_output_retries_once_with_larger_limit(monkeypatch, tmp_path):

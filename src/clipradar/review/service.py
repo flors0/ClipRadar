@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from clipradar.jobs.pipeline import AnalysisPipeline
-from clipradar.models import ClipStatus
+from clipradar.models import ClipStatus, ReframeMode
 from clipradar.storage.repositories import Repositories
 
 
@@ -50,21 +50,32 @@ class ReviewService:
         )
         self.repos.activity.add(message, "warning")
 
-    def prepare_regeneration(self, clip_id: int, reframe_mode: str | None = None) -> int:
+    def prepare_regeneration(self, clip_id: int, reframe_mode: str | None = None) -> tuple[int, str]:
         clip = self._require(clip_id)
-        if reframe_mode:
-            self.repos.candidates.update_reframe_mode(clip.candidate_id, reframe_mode)
-        self.repos.clips.update_status(clip_id, ClipStatus.REGENERATING)
-        return clip.candidate_id
-
-    def finish_regeneration(self, original_clip_id: int, candidate_id: int) -> int:
+        if clip.status == ClipStatus.REGENERATING:
+            raise RuntimeError("This clip is already being regenerated.")
+        if not Path(clip.file_path).is_file():
+            raise FileNotFoundError("The rendered clip file is missing.")
+        candidate = self.repos.candidates.get(clip.candidate_id)
+        if not candidate:
+            raise ValueError("The clip candidate no longer exists.")
         try:
-            new_id = self.pipeline.render_existing_candidate(candidate_id)
-        except Exception:
+            mode = ReframeMode(reframe_mode or candidate.reframe_mode).value
+        except ValueError as exc:
+            raise ValueError("Select a valid reframe mode.") from exc
+        self.repos.clips.update_status(clip_id, ClipStatus.REGENERATING)
+        return clip.candidate_id, mode
+
+    def finish_regeneration(self, original_clip_id: int, candidate_id: int, reframe_mode: str) -> int:
+        original = self._require(original_clip_id)
+        try:
+            new_id = self.pipeline.regenerate_framing(candidate_id, original.file_path, reframe_mode)
+        except Exception as exc:
             self.repos.clips.update_status(original_clip_id, ClipStatus.READY)
+            self.repos.activity.add(f"Framing regeneration failed · {str(exc)[:500]}", "error")
             raise
         self.repos.clips.update_status(original_clip_id, ClipStatus.REJECTED)
-        self.repos.activity.add("Clip regenerated", "success")
+        self.repos.activity.add("Regenerated framing is ready for review", "success")
         return new_id
 
     def _require(self, clip_id: int):

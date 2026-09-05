@@ -31,7 +31,9 @@ from PySide6.QtWidgets import (
 )
 
 from clipradar.publishing.service import PublishingService
-from clipradar.storage.repositories import ClipRepository
+from clipradar.settings.models import UIStateSettings
+from clipradar.settings.service import SettingsService
+from clipradar.storage.repositories import ChannelRepository, ClipRepository
 from clipradar.ui.common import card_layout, format_time, muted_label, status_pill, title_label
 
 
@@ -187,14 +189,19 @@ class ReviewPage(QWidget):
     def __init__(
         self,
         repository: ClipRepository,
+        channels: ChannelRepository,
+        settings: SettingsService,
         publishing: PublishingService,
         parent: QWidget | None = None,
     ):
         super().__init__(parent)
         self.repository = repository
+        self.channels = channels
+        self.settings = settings
         self.publishing = publishing
         self.records: list[dict] = []
         self.current: dict | None = None
+        self.selected_channel_id = self.settings.ui_state().review_channel_id
         self.audio = QAudioOutput(self)
         self.audio.setVolume(0.85)
         self.player = QMediaPlayer(self)
@@ -214,6 +221,16 @@ class ReviewPage(QWidget):
         self.count = muted_label("0 clips")
         header.addWidget(self.count)
         left_layout.addLayout(header)
+        channel_row = QHBoxLayout()
+        channel_row.addWidget(muted_label("Channel"))
+        self.channel_filter = QComboBox()
+        self.channel_filter.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.channel_filter.setMinimumContentsLength(18)
+        self.channel_filter.currentIndexChanged.connect(self._channel_changed)
+        channel_row.addWidget(self.channel_filter, 1)
+        left_layout.addLayout(channel_row)
         self.list = QListWidget()
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.setSpacing(8)
@@ -279,6 +296,9 @@ class ReviewPage(QWidget):
             self.reframe.addItem(label, value)
         edit_row.addWidget(self.reframe, 1)
         self.regenerate = QPushButton("Regenerate framing")
+        self.regenerate.setToolTip(
+            "Gemini compares the original segment with this render and creates a new framing plan."
+        )
         self.regenerate.clicked.connect(self._emit_regenerate)
         edit_row.addWidget(self.regenerate)
         right_layout.addLayout(edit_row)
@@ -316,7 +336,30 @@ class ReviewPage(QWidget):
 
     def refresh(self) -> None:
         current_id = self.current["id"] if self.current else None
-        self.records = self.repository.list_review()
+        all_records = self.repository.list_review()
+        channels = self.channels.list_all()
+        valid_channel_ids = {int(channel.id) for channel in channels if channel.id is not None}
+        if self.selected_channel_id not in valid_channel_ids:
+            self.selected_channel_id = int(channels[0].id) if channels else None
+        counts: dict[int, int] = {}
+        for clip in all_records:
+            channel_id = int(clip["channel_id"])
+            counts[channel_id] = counts.get(channel_id, 0) + 1
+        self.channel_filter.blockSignals(True)
+        self.channel_filter.clear()
+        for channel in channels:
+            channel_id = int(channel.id)
+            count = counts.get(channel_id, 0)
+            self.channel_filter.addItem(f"{channel.name}  ·  {count}", channel_id)
+        if self.selected_channel_id is not None:
+            index = self.channel_filter.findData(self.selected_channel_id)
+            self.channel_filter.setCurrentIndex(index if index >= 0 else 0)
+        self.channel_filter.setEnabled(bool(channels))
+        self.channel_filter.blockSignals(False)
+        self.records = [
+            clip for clip in all_records
+            if self.selected_channel_id is not None and int(clip["channel_id"]) == self.selected_channel_id
+        ]
         self.list.blockSignals(True)
         self.list.clear()
         selected_row = -1
@@ -345,6 +388,15 @@ class ReviewPage(QWidget):
             self.metadata_status.setText("Metadata —")
             self._set_actions(False, False)
 
+    def _channel_changed(self, index: int) -> None:
+        channel_id = self.channel_filter.itemData(index) if index >= 0 else None
+        if channel_id is None:
+            return
+        self.selected_channel_id = int(channel_id)
+        self.settings.save_ui_state(UIStateSettings(review_channel_id=self.selected_channel_id))
+        self.current = None
+        self.refresh()
+
     def _select(self, row: int) -> None:
         if row < 0 or row >= len(self.records):
             return
@@ -362,10 +414,13 @@ class ReviewPage(QWidget):
         end = self.current["refined_end_seconds"] or self.current["end_seconds"]
         self.timestamp.setText(f"Source {format_time(start)} → {format_time(end)}")
         self.clip_duration.setText(f"Clip {format_time(self.current['duration_seconds'])}")
-        self._set_status(
-            "File missing" if not has_file else f"{round(self.current['ai_score'] or 0)}/100",
-            "#ff7070" if not has_file else "#caff00",
-        )
+        if self.current.get("status") == "Regenerating":
+            self._set_status("Regenerating…", "#caff00")
+        else:
+            self._set_status(
+                "File missing" if not has_file else f"{round(self.current['ai_score'] or 0)}/100",
+                "#ff7070" if not has_file else "#caff00",
+            )
         mode_index = self.reframe.findData(self.current.get("reframe_mode") or "auto")
         self.reframe.setCurrentIndex(mode_index if mode_index >= 0 else 0)
         generated = bool(

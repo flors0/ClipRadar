@@ -6,13 +6,14 @@ import sqlite3
 
 from clipradar.app.logging_setup import RedactingFilter
 from clipradar.models import Channel
-from clipradar.settings.models import AISettings, BudgetSettings, ClipSettings
+from clipradar.settings.models import AISettings, BudgetSettings, ClipSettings, UIStateSettings
 from clipradar.storage.database import Database
 
 
 def test_database_and_settings_survive_restart(services):
     services.settings.save_ai(AISettings(model="gemini-3.8-flash", minimum_ai_score=70))
     services.settings.save_clips(ClipSettings(minimum_duration=10, target_duration=20, maximum_duration=30))
+    services.settings.save_ui_state(UIStateSettings(review_channel_id=7))
     saved = services.repositories.channels.add(Channel(
         id=None,
         channel_id="UC_TEST_CHANNEL_00000001",
@@ -23,6 +24,7 @@ def test_database_and_settings_survive_restart(services):
     restarted = type(services).create(services.paths, services.settings.secrets)
     assert restarted.settings.ai().model == "gemini-3.8-flash"
     assert restarted.settings.clips().target_duration == 20
+    assert restarted.settings.ui_state().review_channel_id == 7
     assert restarted.repositories.channels.get(int(saved.id)).name == "Test Channel"
 
 

@@ -20,13 +20,16 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Apply hard daily limits for videos, source minutes, clips, and estimated AI cost.
 - De-duplicate overlapping moments and render only the best candidates.
 - Ask Gemini for the important scene focus and choose a subject crop, context-preserving frame, or facecam-plus-gameplay layout.
+- Regenerate framing by having Gemini compare the exact original segment with the current vertical render, for Important subject, Facecam + gameplay, and every selectable framing mode.
 - Render 9:16 H.264 MP4 with scene-aware reframing and loudness normalization. Burned captions are disabled by default.
 - Generate a relevant YouTube title, description, and tags for every newly analyzed candidate.
 - Preview, approve, reject, regenerate, open, or trace a clip back to its source in the review queue.
+- Keep each review queue separated by a persistent per-channel selector.
 - Permanently remove a review item and its local file from the right-click menu, including recovery from files deleted outside ClipRadar.
 - Edit Gemini metadata, upload immediately, or choose a scheduled public release from the review flow.
 - Persist upload progress, safely recover interrupted uploads, and track results in a compact publishing queue.
 - Recover interrupted jobs safely after an application restart.
+- Process analysis jobs in one deterministic sequential queue and log candidate outcome summaries, including valid zero-clip results.
 - Inspect up to 200 structured, attempt-grouped activity events in one selectable and copyable log view.
 - Build and smoke-test a bundled Windows EXE through GitHub Actions.
 
@@ -77,7 +80,7 @@ python -m pytest -q
 python -m clipradar --self-test
 ```
 
-Tests cover persistence and migration, secure-secret separation, channel baseline and analysis scheduling, local candidate selection, Gemini's structured metadata/framing schema, real FFmpeg focus and gaming-split rendering, the full pipeline through review, mocked resumable YouTube upload/scheduling, UI navigation, and the packaged executable.
+Tests cover persistence and migration, secure-secret separation, deterministic sequential scheduling, channel-filtered review, local candidate selection, Gemini's structured metadata/framing schemas, protected AI-assisted framing regeneration, real FFmpeg focus and gaming-split rendering, the full pipeline through review, mocked resumable YouTube upload/scheduling, UI navigation, and the packaged executable.
 
 ## Runtime data
 

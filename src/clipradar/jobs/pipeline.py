@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -8,7 +9,7 @@ from clipradar.ai.budget import BudgetGuard
 from clipradar.ai.gemini import GEMINI_MAX_ATTEMPTS, GeminiClient, GeminiError
 from clipradar.analysis.candidates import CandidateDetector
 from clipradar.app.paths import AppPaths
-from clipradar.media.ffmpeg import create_candidate_preview, probe_media
+from clipradar.media.ffmpeg import create_candidate_preview, create_framing_preview, probe_media
 from clipradar.models import AnalysisJob, ClipCandidate, JobStatus, SourceVideo
 from clipradar.rendering.renderer import ClipRenderer
 from clipradar.settings.service import SettingsService
@@ -88,6 +89,10 @@ class AnalysisPipeline:
             ai_settings = self.settings.ai()
             publishing_settings = self.settings.publishing()
             ranked: list[ClipCandidate] = []
+            evaluated_count = 0
+            below_threshold_count = 0
+            overlap_count = 0
+            budget_stopped = False
             max_outputs = min(clip_settings.max_clips_per_video, limits.max_clips_per_video)
             self.repos.activity.add(
                 f"Local analysis found {len(candidates)} candidate{'s' if len(candidates) != 1 else ''} "
@@ -104,6 +109,7 @@ class AnalysisPipeline:
                 request_decision = self.budget.can_send_request(reserve, limits)
                 if not request_decision.allowed:
                     self.repos.activity.add(request_decision.reason, "warning", job.id)
+                    budget_stopped = True
                     break
                 fraction = 0.32 + 0.33 * (index / max(1, len(candidates)))
                 self._set(job, JobStatus.ANALYZING, f"Gemini ranking candidate {index + 1}/{len(candidates)}", fraction, progress)
@@ -182,10 +188,15 @@ class AnalysisPipeline:
                 candidate.facecam_y = result.facecam_y
                 candidate.facecam_width = result.facecam_width
                 candidate.facecam_height = result.facecam_height
+                evaluated_count += 1
                 meets_threshold = result.score >= ai_settings.minimum_ai_score
                 overlaps = meets_threshold and self._overlaps_selected(candidate, ranked)
                 if meets_threshold and not overlaps:
                     ranked.append(candidate)
+                elif overlaps:
+                    overlap_count += 1
+                else:
+                    below_threshold_count += 1
                 outcome = (
                     "selected for rendering"
                     if meets_threshold and not overlaps
@@ -202,6 +213,14 @@ class AnalysisPipeline:
                 )
 
             ranked.sort(key=lambda item: item.ai_score or 0, reverse=True)
+            self.repos.activity.add(
+                f"Candidate summary · {len(candidates)} detected · {evaluated_count} Gemini-evaluated · "
+                f"{below_threshold_count} below threshold · {overlap_count} overlapping · "
+                f"{len(ranked)} selected"
+                + (" · stopped by budget" if budget_stopped else ""),
+                "info",
+                job.id,
+            )
             rendered = 0
             for index, candidate in enumerate(ranked[:max_outputs]):
                 self.repos.activity.add(
@@ -224,7 +243,14 @@ class AnalysisPipeline:
                 self.repos.clips.add(clip)
                 self.repos.candidates.mark_rendered(int(candidate.id))
                 rendered += 1
-            stage = f"{rendered} clip{'s' if rendered != 1 else ''} ready for review" if rendered else "No candidate passed the quality threshold"
+            if rendered:
+                stage = f"{rendered} clip{'s' if rendered != 1 else ''} ready for review"
+            elif budget_stopped and not evaluated_count:
+                stage = "No clips rendered because the AI budget blocked candidate evaluation"
+            elif not evaluated_count:
+                stage = "No clips rendered because no candidate was evaluated"
+            else:
+                stage = "No candidate passed the quality and overlap checks"
             self._set(job, JobStatus.READY, stage, 1.0, progress)
             self.repos.activity.add(stage, "success" if rendered else "info", job.id)
             return rendered
@@ -249,6 +275,145 @@ class AnalysisPipeline:
         )
         saved = self.repos.clips.add(clip)
         return int(saved.id)
+
+    def regenerate_framing(
+        self,
+        candidate_id: int,
+        current_render_path: str | Path,
+        requested_mode: str,
+    ) -> int:
+        """Use Gemini to repair framing while leaving clip selection and metadata untouched."""
+        candidate = self.repos.candidates.get(candidate_id)
+        if not candidate:
+            raise ValueError("The clip candidate no longer exists.")
+        current_render = Path(current_render_path)
+        if not current_render.is_file():
+            raise FileNotFoundError("The rendered clip file is missing.")
+        current_info = probe_media(current_render)
+        source = self._require_video(candidate.source_video_id)
+        source, _ = self._ensure_download(source)
+        clip_settings = self._clip_settings_for(source)
+        ai_settings = self.settings.ai()
+        key = self.settings.secrets.get_gemini_key()
+        if not key:
+            raise GeminiError("No Gemini API key is configured. Open Settings → AI.")
+
+        per_attempt_reserve = self._conservative_request_reserve(candidate, ai_settings.model)
+        reserve = per_attempt_reserve * GEMINI_MAX_ATTEMPTS
+        request_decision = self.budget.can_send_request(reserve, self.settings.budget())
+        if not request_decision.allowed:
+            raise RuntimeError(request_decision.reason.replace("next candidate", "framing regeneration"))
+
+        original_preview = self.paths.candidates / f"reframe_{candidate_id}_original.mp4"
+        current_preview = self.paths.candidates / f"reframe_{candidate_id}_current.mp4"
+        self.repos.activity.add(
+            f"Framing regeneration started · mode {requested_mode} · model {ai_settings.model}"
+        )
+        try:
+            create_candidate_preview(
+                source.local_path,
+                original_preview,
+                candidate.render_start,
+                candidate.render_end,
+            )
+            create_framing_preview(
+                current_render,
+                current_preview,
+                0,
+                current_info.duration,
+            )
+            self.repos.usage.add(estimated_cost_eur=reserve)
+            try:
+                result = self.gemini.analyze_framing(
+                    api_key=key,
+                    model=ai_settings.model,
+                    original_preview_path=original_preview,
+                    current_preview_path=current_preview,
+                    requested_mode=requested_mode,
+                    candidate=candidate,
+                    temperature=ai_settings.temperature,
+                    event_callback=lambda message, level: self.repos.activity.add(message, level),
+                )
+            except GeminiError as exc:
+                unknown_requests = max(0, exc.request_count - exc.responses_with_usage)
+                retained_cost = exc.estimated_cost_eur + per_attempt_reserve * unknown_requests
+                self.repos.usage.add(
+                    requests=exc.request_count,
+                    input_tokens=exc.input_tokens,
+                    output_tokens=exc.output_tokens,
+                    estimated_cost_eur=retained_cost - reserve,
+                )
+                raise
+        finally:
+            original_preview.unlink(missing_ok=True)
+            current_preview.unlink(missing_ok=True)
+        self.repos.usage.add(
+            requests=result.request_count,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            estimated_cost_eur=result.estimated_cost_eur - reserve,
+        )
+
+        proposal = replace(
+            candidate,
+            reframe_mode=result.reframe_mode,
+            focus_x=result.focus_x,
+            focus_y=result.focus_y,
+            facecam_x=result.facecam_x,
+            facecam_y=result.facecam_y,
+            facecam_width=result.facecam_width,
+            facecam_height=result.facecam_height,
+        )
+        rendered = None
+        try:
+            rendered = self.renderer.render(
+                source,
+                proposal,
+                clip_settings,
+                output_override=self.settings.storage().output_directory,
+            )
+            self._validate_regenerated_clip(rendered.file_path, proposal, clip_settings)
+            self._store_framing(candidate_id, proposal)
+            try:
+                saved = self.repos.clips.add(rendered)
+            except Exception:
+                self._store_framing(candidate_id, candidate)
+                raise
+        except Exception:
+            if rendered:
+                Path(rendered.file_path).unlink(missing_ok=True)
+                Path(rendered.file_path).with_suffix(".ass").unlink(missing_ok=True)
+            raise
+        self.repos.activity.add(
+            f"Framing regeneration completed · mode {result.reframe_mode} · "
+            f"focus {result.focus_x:.3f},{result.focus_y:.3f} · {result.request_count} Gemini "
+            f"request{'s' if result.request_count != 1 else ''} · {result.reason}",
+            "success",
+        )
+        return int(saved.id)
+
+    def _store_framing(self, candidate_id: int, candidate: ClipCandidate) -> None:
+        self.repos.candidates.update_framing(
+            candidate_id,
+            reframe_mode=candidate.reframe_mode,
+            focus_x=candidate.focus_x,
+            focus_y=candidate.focus_y,
+            facecam_x=candidate.facecam_x,
+            facecam_y=candidate.facecam_y,
+            facecam_width=candidate.facecam_width,
+            facecam_height=candidate.facecam_height,
+        )
+
+    @staticmethod
+    def _validate_regenerated_clip(file_path: str, candidate: ClipCandidate, clip_settings) -> None:
+        info = probe_media(file_path)
+        expected_duration = candidate.render_end - candidate.render_start
+        if info.duration <= 0 or abs(info.duration - expected_duration) > max(1.25, expected_duration * 0.12):
+            raise RuntimeError("The regenerated clip failed duration validation. The existing clip was kept.")
+        if clip_settings.output_format == "Vertical 9:16":
+            expected = (clip_settings.render_width // 2 * 2, clip_settings.render_height // 2 * 2)
+            if (info.width, info.height) != expected:
+                raise RuntimeError("The regenerated clip failed resolution validation. The existing clip was kept.")
 
     def _ensure_download(self, source: SourceVideo) -> tuple[SourceVideo, Path | None]:
         if source.local_path and Path(source.local_path).exists():

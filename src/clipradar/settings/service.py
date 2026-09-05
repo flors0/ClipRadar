@@ -13,6 +13,7 @@ from clipradar.settings.models import (
     MonitoringSettings,
     PublishingSettings,
     StorageSettings,
+    UIStateSettings,
     merge_dataclass,
 )
 from clipradar.settings.secrets import SecretStore
@@ -59,6 +60,9 @@ class SettingsService:
     def publishing(self) -> PublishingSettings:
         return merge_dataclass(PublishingSettings, self._read("publishing"))
 
+    def ui_state(self) -> UIStateSettings:
+        return merge_dataclass(UIStateSettings, self._read("ui_state"))
+
     def save_general(self, value: GeneralSettings) -> None:
         self._write("general", value)
 
@@ -91,3 +95,6 @@ class SettingsService:
         if value.default_privacy not in {"Private", "Unlisted", "Public"}:
             raise ValueError("Select a valid default YouTube visibility.")
         self._write("publishing", value)
+
+    def save_ui_state(self, value: UIStateSettings) -> None:
+        self._write("ui_state", value)

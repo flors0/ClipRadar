@@ -138,7 +138,9 @@ class ChannelService:
         if self.repos.jobs.has_active_for_video(int(source.id)):
             raise ValueError("This video already has an active analysis job.")
         job = self.repos.jobs.create(int(source.id), scheduled_at=scheduled_at, manual=manual)
-        self.repos.activity.add(f"Queued {source.title}", job_id=job.id)
+        position = self.repos.jobs.queue_position(job.id)
+        suffix = f" · sequential queue position {position}" if position is not None else ""
+        self.repos.activity.add(f"Queued {source.title}{suffix}", job_id=job.id)
         return job.id
 
     def _require_channel(self, channel_id: int) -> Channel:

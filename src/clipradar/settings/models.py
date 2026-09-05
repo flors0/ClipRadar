@@ -69,6 +69,13 @@ class PublishingSettings:
     default_tags: str = ""
 
 
+@dataclass(slots=True)
+class UIStateSettings:
+    """Small persisted UI choices that should survive an app restart."""
+
+    review_channel_id: int | None = None
+
+
 T = TypeVar("T")
 
 

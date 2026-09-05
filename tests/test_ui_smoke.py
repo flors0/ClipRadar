@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-from clipradar.models import Channel, ClipCandidate, RenderedClip, SourceVideo, utc_now
+from clipradar.app.coordinator import BackgroundCoordinator
+from clipradar.models import Channel, ClipCandidate, JobStatus, RenderedClip, SourceVideo, utc_now
 from clipradar.ui.main_window import MainWindow
 
 
@@ -80,3 +83,91 @@ def test_review_missing_file_keeps_reject_and_permanent_delete_available(qtbot, 
     assert window.review.delete_clip.isEnabled()
     assert not window.review.approve.isEnabled()
     assert "File missing" in window.review.status.text()
+
+
+def test_review_queue_filters_by_one_persisted_channel(qtbot, services, tmp_path: Path):
+    channels = []
+    for index, name in enumerate(("Alpha Channel", "Beta Channel"), start=1):
+        channel = services.repositories.channels.add(Channel(
+            None,
+            f"UC_FILTER_{index}",
+            name,
+            "",
+            f"https://youtube.test/filter-{index}",
+        ))
+        source, _ = services.repositories.videos.upsert(SourceVideo(
+            None,
+            int(channel.id),
+            f"filter-video-{index}",
+            f"{name} source",
+            f"https://youtube.test/watch?v=filter-{index}",
+        ))
+        candidate = services.repositories.candidates.replace_for_video(int(source.id), [
+            ClipCandidate(None, int(source.id), 5, 25, 88, {}, ai_score=90)
+        ])[0]
+        clip_path = tmp_path / f"filter-{index}.mp4"
+        clip_path.write_bytes(b"review-filter-media")
+        services.repositories.clips.add(RenderedClip(
+            None,
+            int(candidate.id),
+            int(source.id),
+            str(clip_path),
+            20,
+            "Vertical 9:16",
+        ))
+        channels.append(channel)
+
+    window = MainWindow(services, start_background=False)
+    qtbot.addWidget(window)
+    window.review.refresh()
+
+    assert window.review.channel_filter.count() == 2
+    assert {record["channel_id"] for record in window.review.records} == {int(channels[0].id)}
+    beta_index = window.review.channel_filter.findData(int(channels[1].id))
+    window.review.channel_filter.setCurrentIndex(beta_index)
+    assert {record["channel_id"] for record in window.review.records} == {int(channels[1].id)}
+    assert services.settings.ui_state().review_channel_id == int(channels[1].id)
+
+
+def test_background_coordinator_never_runs_two_analysis_jobs_at_once(qtbot, services):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_SERIAL", "Serial Channel", "", "https://youtube.test/serial"
+    ))
+    job_ids = []
+    for index in range(2):
+        source, _ = services.repositories.videos.upsert(SourceVideo(
+            None,
+            int(channel.id),
+            f"serial-video-{index}",
+            f"Serial source {index}",
+            f"https://youtube.test/watch?v=serial-{index}",
+        ))
+        job_ids.append(services.repositories.jobs.create(int(source.id), utc_now(), manual=True).id)
+
+    release_first = threading.Event()
+    calls = []
+
+    def fake_run(job_id, _progress):
+        calls.append(job_id)
+        if len(calls) == 1:
+            assert release_first.wait(timeout=5)
+        services.repositories.jobs.update(job_id, JobStatus.READY, "Test complete", 1.0)
+        return 0
+
+    services.pipeline.run = fake_run
+    coordinator = BackgroundCoordinator(services)
+    coordinator._last_monitor_check = time.monotonic()
+    try:
+        coordinator._tick()
+        qtbot.waitUntil(lambda: len(calls) == 1, timeout=3000)
+        coordinator._tick()
+        assert calls == [job_ids[0]]
+        release_first.set()
+        qtbot.waitUntil(lambda: "pipeline" not in coordinator.running, timeout=3000)
+        coordinator._tick()
+        qtbot.waitUntil(lambda: len(calls) == 2, timeout=3000)
+        assert calls == job_ids
+        qtbot.waitUntil(lambda: "pipeline" not in coordinator.running, timeout=3000)
+    finally:
+        release_first.set()
+        coordinator.stop()

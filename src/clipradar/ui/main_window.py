@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.2.1")
+        version = QLabel("v0.3.0")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -124,7 +124,12 @@ class MainWindow(QMainWindow):
         self.pages = QStackedWidget()
         self.dashboard = DashboardPage(self.services.repositories)
         self.channels = ChannelsPage(self.services.repositories.channels)
-        self.review = ReviewPage(self.services.repositories.clips, self.services.publishing)
+        self.review = ReviewPage(
+            self.services.repositories.clips,
+            self.services.repositories.channels,
+            self.services.settings,
+            self.services.publishing,
+        )
         self.publishing = PublishingPage(self.services.repositories.publish)
         self.settings = SettingsPage(self.services.settings, self.services.paths, self.services.publishing)
         for page in (self.dashboard, self.channels, self.review, self.publishing, self.settings):
@@ -260,7 +265,8 @@ class MainWindow(QMainWindow):
 
     def _regenerate(self, clip_id: int, reframe_mode: str) -> None:
         if self.coordinator.regenerate(clip_id, reframe_mode):
-            self._toast("Regenerating clip…")
+            self.refresh_all()
+            self._toast("Gemini is re-analyzing the framing…")
 
     def _publish(self, clip_id: int, metadata: dict) -> None:
         try:

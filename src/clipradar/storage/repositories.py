@@ -212,10 +212,23 @@ class JobRepository:
             row = connection.execute(
                 """SELECT * FROM analysis_jobs
                    WHERE status IN (?, ?) AND scheduled_at <= ?
-                   ORDER BY manual DESC, scheduled_at, created_at LIMIT 1""",
+                   ORDER BY manual DESC, scheduled_at, created_at, rowid LIMIT 1""",
                 (JobStatus.WAITING.value, JobStatus.SCHEDULED.value, now),
             ).fetchone()
         return _job(row) if row else None
+
+    def queue_position(self, job_id: str) -> int | None:
+        """Return the one-based position in the single sequential analysis queue."""
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """SELECT id FROM analysis_jobs WHERE status IN (?, ?)
+                   ORDER BY manual DESC, scheduled_at, created_at, rowid""",
+                (JobStatus.WAITING.value, JobStatus.SCHEDULED.value),
+            ).fetchall()
+        for index, row in enumerate(rows, start=1):
+            if row["id"] == job_id:
+                return index
+        return None
 
     def get(self, job_id: str) -> AnalysisJob | None:
         with self.db.connection() as connection:
@@ -358,6 +371,40 @@ class CandidateRepository:
                 (mode, candidate_id),
             )
 
+    def update_framing(
+        self,
+        candidate_id: int,
+        *,
+        reframe_mode: str,
+        focus_x: float,
+        focus_y: float,
+        facecam_x: float | None,
+        facecam_y: float | None,
+        facecam_width: float | None,
+        facecam_height: float | None,
+    ) -> None:
+        if reframe_mode not in {"auto", "focus", "gaming_split", "center", "contain"}:
+            raise ValueError("Select a valid reframe mode.")
+        values = (focus_x, focus_y)
+        if any(value < 0 or value > 1 for value in values):
+            raise ValueError("Framing focus coordinates must be between zero and one.")
+        facecam = (facecam_x, facecam_y, facecam_width, facecam_height)
+        if any(value is not None for value in facecam):
+            if any(value is None for value in facecam):
+                raise ValueError("The facecam rectangle is incomplete.")
+            x, y, width, height = (float(value) for value in facecam)
+            if width < 0.06 or height < 0.06 or min(x, y) < 0 or x + width > 1.01 or y + height > 1.01:
+                raise ValueError("The facecam rectangle is outside the source frame.")
+        with self.db.connection() as connection:
+            connection.execute(
+                """UPDATE clip_candidates SET reframe_mode = ?, focus_x = ?, focus_y = ?,
+                   facecam_x = ?, facecam_y = ?, facecam_width = ?, facecam_height = ? WHERE id = ?""",
+                (
+                    reframe_mode, focus_x, focus_y, facecam_x, facecam_y,
+                    facecam_width, facecam_height, candidate_id,
+                ),
+            )
+
 
 class ClipRepository:
     def __init__(self, database: Database):
@@ -410,7 +457,7 @@ class ClipRepository:
                     x.refined_end_seconds, x.ai_score, x.ai_reason, x.ai_title, x.ai_description,
                     x.ai_tags_json, x.reframe_mode, x.focus_x, x.focus_y, x.facecam_x,
                     x.facecam_y, x.facecam_width, x.facecam_height, v.title AS video_title,
-                    v.url AS source_url, c.name AS channel_name
+                    v.url AS source_url, c.id AS channel_id, c.name AS channel_name
                     FROM rendered_clips r
                     JOIN clip_candidates x ON x.id = r.candidate_id
                     JOIN source_videos v ON v.id = r.source_video_id

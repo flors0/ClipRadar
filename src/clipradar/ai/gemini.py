@@ -21,6 +21,8 @@ GEMINI_MODELS = [
 
 GEMINI_MAX_ATTEMPTS = 2
 _OUTPUT_TOKEN_LIMITS = (8192, 16384)
+_FRAMING_OUTPUT_TOKEN_LIMITS = (2048, 4096)
+_REFRAME_MODES = {"auto", "focus", "gaming_split", "center", "contain"}
 GeminiEventCallback = Callable[[str, str], None]
 
 
@@ -73,6 +75,18 @@ class ClipEvaluation(BaseModel):
     facecam_height: int = Field(default=0, ge=0, le=1000)
 
 
+class FramingEvaluation(BaseModel):
+    reason: str = Field(min_length=3, max_length=280)
+    reframe_mode: Literal["focus", "gaming_split", "center", "contain"] = "focus"
+    focus_x: int = Field(default=500, ge=0, le=1000)
+    focus_y: int = Field(default=500, ge=0, le=1000)
+    facecam_present: bool = False
+    facecam_x: int = Field(default=0, ge=0, le=1000)
+    facecam_y: int = Field(default=0, ge=0, le=1000)
+    facecam_width: int = Field(default=0, ge=0, le=1000)
+    facecam_height: int = Field(default=0, ge=0, le=1000)
+
+
 @dataclass(frozen=True, slots=True)
 class EvaluationResult:
     score: int
@@ -93,6 +107,22 @@ class EvaluationResult:
     facecam_y: float | None = None
     facecam_width: float | None = None
     facecam_height: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FramingResult:
+    reason: str
+    reframe_mode: str
+    focus_x: float
+    focus_y: float
+    facecam_x: float | None
+    facecam_y: float | None
+    facecam_width: float | None
+    facecam_height: float | None
+    input_tokens: int
+    output_tokens: int
+    estimated_cost_eur: float
+    request_count: int = 1
 
 
 class GeminiClient:
@@ -256,6 +286,229 @@ class GeminiClient:
             facecam_height=facecam[3],
         )
 
+    def analyze_framing(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        original_preview_path: str | Path,
+        current_preview_path: str | Path,
+        requested_mode: str,
+        candidate: ClipCandidate,
+        temperature: float,
+        event_callback: GeminiEventCallback | None = None,
+    ) -> FramingResult:
+        """Compare source and current render, then return a replacement framing plan only."""
+        if requested_mode not in _REFRAME_MODES:
+            raise GeminiError("Select a valid reframe mode.")
+        if not api_key.strip():
+            raise GeminiError("No Gemini API key is configured. Open Settings → AI.")
+        original_data = Path(original_preview_path).read_bytes()
+        current_data = Path(current_preview_path).read_bytes()
+        if len(original_data) + len(current_data) > 19 * 1024 * 1024:
+            raise GeminiError("The framing comparison previews exceed the safe inline upload limit.")
+
+        prompt = self._framing_prompt(candidate, requested_mode)
+        event_callback = event_callback or (lambda _message, _level: None)
+        request_count = 0
+        responses_with_usage = 0
+        input_tokens = 0
+        output_tokens = 0
+        try:
+            from google import genai
+            from google.genai import types
+
+            original_part = types.Part.from_bytes(data=original_data, mime_type="video/mp4")
+            current_part = types.Part.from_bytes(data=current_data, mime_type="video/mp4")
+            with genai.Client(api_key=api_key.strip()) as client:
+                for attempt in range(GEMINI_MAX_ATTEMPTS):
+                    request_count += 1
+                    config = types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=FramingEvaluation,
+                        temperature=max(0.0, min(1.0, temperature)) if attempt == 0 else 0.0,
+                        max_output_tokens=_FRAMING_OUTPUT_TOKEN_LIMITS[attempt],
+                    )
+                    retry_prompt = prompt
+                    if attempt:
+                        retry_prompt += (
+                            "\nThe previous structured response was incomplete. Return one complete, compact "
+                            "JSON object containing only the requested framing fields."
+                        )
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[retry_prompt, original_part, current_part],
+                        config=config,
+                    )
+                    usage = getattr(response, "usage_metadata", None)
+                    if usage is not None:
+                        responses_with_usage += 1
+                    input_tokens += int(getattr(usage, "prompt_token_count", 0) or 0)
+                    output_tokens += int(getattr(usage, "candidates_token_count", 0) or 0)
+                    output_tokens += int(getattr(usage, "thoughts_token_count", 0) or 0)
+                    try:
+                        evaluation = self._parse_framing(response)
+                        break
+                    except _StructuredOutputError as exc:
+                        if not exc.retryable:
+                            reason = exc.finish_reason or "provider policy"
+                            raise GeminiError(
+                                f"Gemini stopped the framing analysis before completing it ({reason}).",
+                                request_count=request_count,
+                                responses_with_usage=responses_with_usage,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+                            ) from exc
+                        if attempt + 1 >= GEMINI_MAX_ATTEMPTS:
+                            reason = f" ({exc.finish_reason})" if exc.finish_reason else ""
+                            raise GeminiError(
+                                "Gemini returned an incomplete framing response"
+                                f"{reason} twice. The existing clip was kept unchanged.",
+                                request_count=request_count,
+                                responses_with_usage=responses_with_usage,
+                                input_tokens=input_tokens,
+                                output_tokens=output_tokens,
+                                estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+                            ) from exc
+                        event_callback(
+                            "Gemini framing response was incomplete; retrying once with a larger output limit.",
+                            "warning",
+                        )
+        except Exception as exc:
+            if isinstance(exc, GeminiError):
+                raise
+            raise GeminiError(
+                self._safe_message(exc, api_key),
+                request_count=request_count,
+                responses_with_usage=responses_with_usage,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+            ) from exc
+
+        mode = evaluation.reframe_mode if requested_mode == "auto" else requested_mode
+        facecam = _normalize_facecam_values(
+            evaluation.facecam_x,
+            evaluation.facecam_y,
+            evaluation.facecam_width,
+            evaluation.facecam_height,
+        )
+        if mode == "gaming_split" and (not evaluation.facecam_present or facecam[0] is None):
+            if requested_mode == "auto":
+                mode = "focus"
+                facecam = (None, None, None, None)
+            else:
+                raise GeminiError(
+                    "Gemini could not locate a valid facecam region for Facecam + gameplay. "
+                    "The existing clip was kept unchanged.",
+                    request_count=request_count,
+                    responses_with_usage=responses_with_usage,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+                )
+        elif mode != "gaming_split":
+            facecam = (None, None, None, None)
+        return FramingResult(
+            reason=evaluation.reason.strip()[:280],
+            reframe_mode=mode,
+            focus_x=evaluation.focus_x / 1000,
+            focus_y=evaluation.focus_y / 1000,
+            facecam_x=facecam[0],
+            facecam_y=facecam[1],
+            facecam_width=facecam[2],
+            facecam_height=facecam[3],
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
+            request_count=request_count,
+        )
+
+    @staticmethod
+    def _parse_framing(response: object) -> FramingEvaluation:
+        finish_reason = _finish_reason(response)
+        if finish_reason and finish_reason != "STOP":
+            blocked = finish_reason in {
+                "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+            }
+            raise _StructuredOutputError(
+                "Gemini did not complete the framing response.",
+                finish_reason,
+                retryable=not blocked,
+            )
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, FramingEvaluation):
+            return parsed
+        if parsed is not None:
+            try:
+                return FramingEvaluation.model_validate(parsed)
+            except Exception:
+                pass
+        try:
+            text = str(getattr(response, "text", "") or "").strip()
+        except Exception:
+            text = ""
+        if text.startswith("```"):
+            lines = text.splitlines()
+            lines = lines[1:] if lines and lines[0].startswith("```") else lines
+            lines = lines[:-1] if lines and lines[-1].strip() == "```" else lines
+            text = "\n".join(lines).strip()
+        try:
+            return FramingEvaluation.model_validate(json.loads(text))
+        except Exception as exc:
+            raise _StructuredOutputError(
+                "Gemini returned malformed or truncated framing JSON.",
+                finish_reason,
+            ) from exc
+
+    @staticmethod
+    def _framing_prompt(candidate: ClipCandidate, requested_mode: str) -> str:
+        target = {
+            "auto": (
+                "Automatic fallback: choose focus, gaming_split, contain, or center based on what keeps the "
+                "meaningful visual context throughout the clip."
+            ),
+            "focus": (
+                "Important subject: independently reconsider what person, object, reaction, or gameplay action "
+                "is actually important. Place focus_x/focus_y on that subject instead of assuming the old focus "
+                "or geometric center was correct."
+            ),
+            "gaming_split": (
+                "Facecam + gameplay: precisely locate the visible facecam overlay and separately place "
+                "focus_x/focus_y on the gameplay action that carries the clip's context."
+            ),
+            "contain": "Keep full context: preserve the complete wide frame inside the vertical result.",
+            "center": "Simple center crop: retain a geometric center crop.",
+        }[requested_mode]
+        old_facecam = (
+            f"x={round(candidate.facecam_x * 1000)}, y={round(candidate.facecam_y * 1000)}, "
+            f"w={round(candidate.facecam_width * 1000)}, h={round(candidate.facecam_height * 1000)}"
+            if all(value is not None for value in (
+                candidate.facecam_x, candidate.facecam_y, candidate.facecam_width, candidate.facecam_height
+            ))
+            else "not available"
+        )
+        return f"""You are repairing the vertical framing of an existing short-form clip.
+The first attached video is the exact ORIGINAL SOURCE SEGMENT. The second attached video is the CURRENT
+VERTICAL RENDER whose framing the user wants regenerated. Analyze both across their full duration. Do not
+rescore the moment, change clip boundaries, rewrite metadata, or add editing effects. Return only a framing plan.
+
+Selected target mode: {requested_mode}
+Target behavior: {target}
+
+Treat the selected target as a hard constraint unless it is Automatic fallback. For Important subject, inspect
+the actual scene again and correct the old focus when the current render centers the wrong thing. For Facecam +
+gameplay, facecam_present may be true only when you can locate a real facecam overlay; its rectangle must tightly
+cover that overlay, while focus_x/focus_y must point to the important gameplay region. Consider the whole segment
+and choose stable coordinates that preserve the action and context rather than one incidental frame.
+
+Coordinates use a 0-1000 grid over the ORIGINAL full source frame.
+Previous mode: {candidate.reframe_mode}
+Previous focus: x={round(candidate.focus_x * 1000)}, y={round(candidate.focus_y * 1000)}
+Previous facecam: {old_facecam}
+"""
+
     @staticmethod
     def _parse_evaluation(response: object) -> ClipEvaluation:
         finish_reason = _finish_reason(response)
@@ -414,12 +667,21 @@ def _clean_tags(values: list[str]) -> list[str]:
 
 
 def _normalize_facecam(evaluation: ClipEvaluation) -> tuple[float | None, float | None, float | None, float | None]:
-    values = (
-        evaluation.facecam_x / 1000,
-        evaluation.facecam_y / 1000,
-        evaluation.facecam_width / 1000,
-        evaluation.facecam_height / 1000,
+    return _normalize_facecam_values(
+        evaluation.facecam_x,
+        evaluation.facecam_y,
+        evaluation.facecam_width,
+        evaluation.facecam_height,
     )
+
+
+def _normalize_facecam_values(
+    raw_x: int,
+    raw_y: int,
+    raw_width: int,
+    raw_height: int,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    values = (raw_x / 1000, raw_y / 1000, raw_width / 1000, raw_height / 1000)
     x, y, width, height = values
     if width < 0.06 or height < 0.06 or x + width > 1.01 or y + height > 1.01:
         return None, None, None, None

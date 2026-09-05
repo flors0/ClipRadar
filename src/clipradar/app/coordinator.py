@@ -52,13 +52,17 @@ class BackgroundCoordinator(QObject):
 
     def regenerate(self, clip_id: int, reframe_mode: str | None = None) -> bool:
         try:
-            candidate_id = self.services.review.prepare_regeneration(clip_id, reframe_mode)
+            candidate_id, resolved_mode = self.services.review.prepare_regeneration(clip_id, reframe_mode)
         except Exception as exc:
             self.task_failed.emit(f"regenerate:{clip_id}", str(exc))
             return False
         return self.execute(
             f"regenerate:{clip_id}",
-            lambda: self.services.review.finish_regeneration(clip_id, candidate_id),
+            lambda: self.services.review.finish_regeneration(
+                clip_id,
+                candidate_id,
+                resolved_mode,
+            ),
         )
 
     def _tick(self) -> None:
