@@ -134,7 +134,7 @@ class PublishDialog(QDialog):
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok
         )
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Approve & upload now")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Approve upload now")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setObjectName("PrimaryButton")
         self.buttons.rejected.connect(self.reject)
         self.buttons.accepted.connect(self._validate)
@@ -146,7 +146,7 @@ class PublishDialog(QDialog):
         if enabled:
             self.privacy.setCurrentText("Public")
         self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(
-            "Approve & schedule" if enabled else "Approve & upload now"
+            "Approve scheduled upload" if enabled else "Approve upload now"
         )
 
     def _validate(self) -> None:
