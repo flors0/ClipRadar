@@ -120,6 +120,14 @@ class ClipCandidate:
     facecam_y: float | None = None
     facecam_width: float | None = None
     facecam_height: float | None = None
+    gameplay_x: float | None = None
+    gameplay_y: float | None = None
+    gameplay_width: float | None = None
+    gameplay_height: float | None = None
+    hud_x: float | None = None
+    hud_y: float | None = None
+    hud_width: float | None = None
+    hud_height: float | None = None
 
     @property
     def render_start(self) -> float:
@@ -141,6 +149,8 @@ class RenderedClip:
     status: ClipStatus = ClipStatus.READY
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
+    buffer_start_seconds: float | None = None
+    buffer_end_seconds: float | None = None
 
     @property
     def path(self) -> Path:

@@ -4,7 +4,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
-    QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -19,9 +18,9 @@ from PySide6.QtWidgets import (
 )
 
 from clipradar.models import Channel
-from clipradar.settings.models import YOUTUBE_VIDEO_CATEGORIES
 from clipradar.settings.service import SettingsService
 from clipradar.storage.repositories import ChannelRepository
+from clipradar.ui.analyze_video_dialog import AnalyzeVideoDialog
 from clipradar.ui.common import card_layout, clear_layout, format_timestamp, muted_label, status_pill, title_label
 
 
@@ -125,29 +124,10 @@ class ChannelCard(QFrame):
         layout.addLayout(actions)
 
     def _specific(self) -> None:
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Analyze specific video")
-        dialog.setMinimumWidth(520)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(title_label("YouTube video URL"))
-        field = QLineEdit()
-        field.setPlaceholderText("https://www.youtube.com/watch?v=…")
-        layout.addWidget(field)
-        layout.addWidget(title_label("Genre"))
-        genre = QComboBox()
-        for name, category_id in YOUTUBE_VIDEO_CATEGORIES:
-            genre.addItem(name, category_id)
-        default_index = genre.findData(self.default_category_id)
-        genre.setCurrentIndex(default_index if default_index >= 0 else 0)
-        layout.addWidget(genre)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
-        buttons.rejected.connect(dialog.reject)
-        buttons.accepted.connect(dialog.accept)
-        layout.addWidget(buttons)
-        if dialog.exec() and field.text().strip():
-            self.specific_requested.emit(
-                int(self.channel.id), field.text().strip(), str(genre.currentData())
-            )
+        dialog = AnalyzeVideoDialog(self.default_category_id, parent=self)
+        if dialog.exec():
+            url, category_id = dialog.payload()
+            self.specific_requested.emit(int(self.channel.id), url, category_id)
 
     def _settings(self) -> None:
         dialog = ChannelSettingsDialog(self.channel, self)

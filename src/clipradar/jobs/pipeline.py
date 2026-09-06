@@ -175,6 +175,14 @@ class AnalysisPipeline:
                     facecam_y=result.facecam_y,
                     facecam_width=result.facecam_width,
                     facecam_height=result.facecam_height,
+                    gameplay_x=result.gameplay_x,
+                    gameplay_y=result.gameplay_y,
+                    gameplay_width=result.gameplay_width,
+                    gameplay_height=result.gameplay_height,
+                    hud_x=result.hud_x,
+                    hud_y=result.hud_y,
+                    hud_width=result.hud_width,
+                    hud_height=result.hud_height,
                 )
                 candidate.ai_score = result.score
                 candidate.ai_reason = result.reason
@@ -190,6 +198,14 @@ class AnalysisPipeline:
                 candidate.facecam_y = result.facecam_y
                 candidate.facecam_width = result.facecam_width
                 candidate.facecam_height = result.facecam_height
+                candidate.gameplay_x = result.gameplay_x
+                candidate.gameplay_y = result.gameplay_y
+                candidate.gameplay_width = result.gameplay_width
+                candidate.gameplay_height = result.gameplay_height
+                candidate.hud_x = result.hud_x
+                candidate.hud_y = result.hud_y
+                candidate.hud_width = result.hud_width
+                candidate.hud_height = result.hud_height
                 evaluated_count += 1
                 meets_threshold = result.score >= ai_settings.minimum_ai_score
                 overlaps = meets_threshold and self._overlaps_selected(candidate, ranked)
@@ -225,6 +241,14 @@ class AnalysisPipeline:
             )
             rendered = 0
             for index, candidate in enumerate(ranked[:max_outputs]):
+                candidate = self._verify_initial_framing(
+                    source,
+                    candidate,
+                    clip_settings,
+                    job.id,
+                    key,
+                    ai_settings,
+                )
                 self.repos.activity.add(
                     f"Rendering clip {index + 1}/{len(ranked[:max_outputs])} · "
                     f"{candidate.render_start:.1f}s–{candidate.render_end:.1f}s · "
@@ -236,7 +260,7 @@ class AnalysisPipeline:
                     job, JobStatus.RENDERING, f"Rendering clip {index + 1}/{len(ranked[:max_outputs])}",
                     0.68 + 0.27 * (index / max(1, len(ranked))), progress,
                 )
-                clip = self.renderer.render(
+                clip = self.renderer.render_review_buffer(
                     source,
                     candidate,
                     clip_settings,
@@ -283,6 +307,8 @@ class AnalysisPipeline:
         candidate_id: int,
         current_render_path: str | Path,
         requested_mode: str,
+        buffer_start_seconds: float | None = None,
+        buffer_end_seconds: float | None = None,
     ) -> int:
         """Use Gemini to repair framing while leaving clip selection and metadata untouched."""
         candidate = self.repos.candidates.get(candidate_id)
@@ -321,8 +347,16 @@ class AnalysisPipeline:
             create_framing_preview(
                 current_render,
                 current_preview,
-                0,
-                current_info.duration,
+                max(
+                    0.0,
+                    candidate.render_start
+                    - (buffer_start_seconds if buffer_start_seconds is not None else candidate.render_start),
+                ),
+                min(
+                    current_info.duration,
+                    candidate.render_end
+                    - (buffer_start_seconds if buffer_start_seconds is not None else candidate.render_start),
+                ),
             )
             self.repos.usage.add(estimated_cost_eur=reserve)
             try:
@@ -365,16 +399,38 @@ class AnalysisPipeline:
             facecam_y=result.facecam_y,
             facecam_width=result.facecam_width,
             facecam_height=result.facecam_height,
+            gameplay_x=result.gameplay_x,
+            gameplay_y=result.gameplay_y,
+            gameplay_width=result.gameplay_width,
+            gameplay_height=result.gameplay_height,
+            hud_x=result.hud_x,
+            hud_y=result.hud_y,
+            hud_width=result.hud_width,
+            hud_height=result.hud_height,
         )
         rendered = None
         try:
-            rendered = self.renderer.render(
-                source,
+            if buffer_start_seconds is not None and buffer_end_seconds is not None:
+                rendered = self.renderer.render_review_buffer(
+                    source,
+                    proposal,
+                    clip_settings,
+                    output_override=self.settings.storage().output_directory,
+                )
+            else:
+                rendered = self.renderer.render(
+                    source,
+                    proposal,
+                    clip_settings,
+                    output_override=self.settings.storage().output_directory,
+                )
+            self._validate_regenerated_clip(
+                rendered.file_path,
                 proposal,
                 clip_settings,
-                output_override=self.settings.storage().output_directory,
+                rendered.buffer_start_seconds,
+                rendered.buffer_end_seconds,
             )
-            self._validate_regenerated_clip(rendered.file_path, proposal, clip_settings)
             self._store_framing(candidate_id, proposal)
             try:
                 saved = self.repos.clips.add(rendered)
@@ -394,6 +450,161 @@ class AnalysisPipeline:
         )
         return int(saved.id)
 
+    def finalize_review_clip(self, clip_id: int) -> None:
+        """Replace a padded review asset with the final selected time range."""
+        clip = self.repos.clips.get(clip_id)
+        if not clip:
+            raise ValueError("The rendered clip no longer exists.")
+        if clip.buffer_start_seconds is None or clip.buffer_end_seconds is None:
+            return
+        candidate = self.repos.candidates.get(clip.candidate_id)
+        if not candidate:
+            raise ValueError("The clip candidate no longer exists.")
+        source = self._require_video(candidate.source_video_id)
+        source, _ = self._ensure_download(source)
+        rendered = self.renderer.render(
+            source,
+            candidate,
+            self._clip_settings_for(source),
+            output_override=self.settings.storage().output_directory,
+        )
+        self._validate_regenerated_clip(rendered.file_path, candidate, self._clip_settings_for(source))
+        old_path = Path(clip.file_path)
+        try:
+            self.repos.clips.replace_media(clip_id, rendered)
+        except Exception:
+            Path(rendered.file_path).unlink(missing_ok=True)
+            Path(rendered.file_path).with_suffix(".ass").unlink(missing_ok=True)
+            raise
+        if old_path != Path(rendered.file_path):
+            old_path.unlink(missing_ok=True)
+            old_path.with_suffix(".ass").unlink(missing_ok=True)
+        self.repos.activity.add(
+            f"Final trim rendered · {candidate.render_start:.1f}s–{candidate.render_end:.1f}s",
+            "success",
+        )
+
+    def _verify_initial_framing(
+        self,
+        source: SourceVideo,
+        candidate: ClipCandidate,
+        clip_settings,
+        job_id: str,
+        api_key: str,
+        ai_settings,
+    ) -> ClipCandidate:
+        """Compare one draft render with the source before it reaches Review."""
+        if candidate.reframe_mode not in {"gaming_split", "focus"}:
+            return candidate
+        per_attempt_reserve = self._conservative_request_reserve(candidate, ai_settings.model)
+        reserve = per_attempt_reserve * GEMINI_MAX_ATTEMPTS
+        decision = self.budget.can_send_request(reserve, self.settings.budget())
+        if not decision.allowed:
+            self.repos.activity.add(
+                f"Initial framing check skipped · {decision.reason}", "warning", job_id
+            )
+            return candidate
+
+        original_preview = self.paths.candidates / f"initial_{candidate.id}_original.mp4"
+        current_preview = self.paths.candidates / f"initial_{candidate.id}_vertical.mp4"
+        draft_path: Path | None = None
+        reserve_recorded = False
+        try:
+            create_candidate_preview(
+                source.local_path,
+                original_preview,
+                candidate.render_start,
+                candidate.render_end,
+            )
+            preview_settings = replace(
+                clip_settings,
+                render_width=360,
+                render_height=640,
+                captions_enabled=False,
+                audio_normalization=False,
+            )
+            draft = self.renderer.render(
+                source,
+                candidate,
+                preview_settings,
+                output_override=str(self.paths.candidates),
+            )
+            draft_path = Path(draft.file_path)
+            create_framing_preview(draft_path, current_preview, 0, draft.duration_seconds)
+            self.repos.usage.add(estimated_cost_eur=reserve)
+            reserve_recorded = True
+            try:
+                result = self.gemini.analyze_framing(
+                    api_key=api_key,
+                    model=ai_settings.model,
+                    original_preview_path=original_preview,
+                    current_preview_path=current_preview,
+                    requested_mode=candidate.reframe_mode,
+                    candidate=candidate,
+                    temperature=ai_settings.temperature,
+                    event_callback=lambda message, level: self.repos.activity.add(
+                        f"Initial framing check · {message}", level, job_id
+                    ),
+                )
+            except GeminiError as exc:
+                unknown_requests = max(0, exc.request_count - exc.responses_with_usage)
+                retained_cost = exc.estimated_cost_eur + per_attempt_reserve * unknown_requests
+                self.repos.usage.add(
+                    requests=exc.request_count,
+                    input_tokens=exc.input_tokens,
+                    output_tokens=exc.output_tokens,
+                    estimated_cost_eur=retained_cost - reserve,
+                )
+                reserve_recorded = False
+                raise
+            self.repos.usage.add(
+                requests=result.request_count,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                estimated_cost_eur=result.estimated_cost_eur - reserve,
+            )
+            reserve_recorded = False
+            proposal = replace(
+                candidate,
+                reframe_mode=result.reframe_mode,
+                focus_x=result.focus_x,
+                focus_y=result.focus_y,
+                facecam_x=result.facecam_x,
+                facecam_y=result.facecam_y,
+                facecam_width=result.facecam_width,
+                facecam_height=result.facecam_height,
+                gameplay_x=result.gameplay_x,
+                gameplay_y=result.gameplay_y,
+                gameplay_width=result.gameplay_width,
+                gameplay_height=result.gameplay_height,
+                hud_x=result.hud_x,
+                hud_y=result.hud_y,
+                hud_width=result.hud_width,
+                hud_height=result.hud_height,
+            )
+            self._store_framing(int(candidate.id), proposal)
+            self.repos.activity.add(
+                f"Initial framing verified · mode {proposal.reframe_mode} · {result.reason}",
+                "success",
+                job_id,
+            )
+            return proposal
+        except Exception as exc:
+            if reserve_recorded:
+                self.repos.usage.add(estimated_cost_eur=-reserve)
+            self.repos.activity.add(
+                f"Initial framing check kept the original plan · {str(exc)[:300]}",
+                "warning",
+                job_id,
+            )
+            return candidate
+        finally:
+            original_preview.unlink(missing_ok=True)
+            current_preview.unlink(missing_ok=True)
+            if draft_path:
+                draft_path.unlink(missing_ok=True)
+                draft_path.with_suffix(".ass").unlink(missing_ok=True)
+
     def _store_framing(self, candidate_id: int, candidate: ClipCandidate) -> None:
         self.repos.candidates.update_framing(
             candidate_id,
@@ -404,12 +615,30 @@ class AnalysisPipeline:
             facecam_y=candidate.facecam_y,
             facecam_width=candidate.facecam_width,
             facecam_height=candidate.facecam_height,
+            gameplay_x=candidate.gameplay_x,
+            gameplay_y=candidate.gameplay_y,
+            gameplay_width=candidate.gameplay_width,
+            gameplay_height=candidate.gameplay_height,
+            hud_x=candidate.hud_x,
+            hud_y=candidate.hud_y,
+            hud_width=candidate.hud_width,
+            hud_height=candidate.hud_height,
         )
 
     @staticmethod
-    def _validate_regenerated_clip(file_path: str, candidate: ClipCandidate, clip_settings) -> None:
+    def _validate_regenerated_clip(
+        file_path: str,
+        candidate: ClipCandidate,
+        clip_settings,
+        buffer_start_seconds: float | None = None,
+        buffer_end_seconds: float | None = None,
+    ) -> None:
         info = probe_media(file_path)
-        expected_duration = candidate.render_end - candidate.render_start
+        expected_duration = (
+            buffer_end_seconds - buffer_start_seconds
+            if buffer_start_seconds is not None and buffer_end_seconds is not None
+            else candidate.render_end - candidate.render_start
+        )
         if info.duration <= 0 or abs(info.duration - expected_duration) > max(1.25, expected_duration * 0.12):
             raise RuntimeError("The regenerated clip failed duration validation. The existing clip was kept.")
         if clip_settings.output_format == "Vertical 9:16":

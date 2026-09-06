@@ -13,17 +13,20 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Establish a safe baseline when a channel is first added so old uploads are not analyzed without limit.
 - Check a bounded recent-upload window and apply a per-channel analysis delay.
 - Manually analyze the latest upload or a specific video.
+- Browse each configured channel's recent uploads in the in-app Dashboard without downloading them, then open, copy, or send one directly to analysis with a per-video genre.
 - Download source media first, retry a rejected HLS stream once through a direct format, then fetch at most one available English VTT caption track as an optional best-effort enhancement.
 - Preselect candidate ranges locally using audio energy, transcript reactions, scene changes, and YouTube heatmap data when available.
 - Send only compressed candidate previews to the selected Gemini model.
 - Validate Gemini finish reasons and retry one incomplete structured response with a larger output budget across every selectable model.
 - Apply hard daily limits for videos, source minutes, clips, and estimated AI cost.
 - De-duplicate overlapping moments and render only the best candidates.
-- Ask Gemini for the important scene focus and choose a subject crop, context-preserving frame, or facecam-plus-gameplay layout.
+- Ask Gemini to locate facecam, gameplay, and relevant HUD/stat regions, keep a stable 29/71 context-to-gameplay layout, and verify one draft render before it reaches Review.
 - Regenerate framing by having Gemini compare the exact original segment with the current vertical render, for Important subject, Facecam + gameplay, and every selectable framing mode.
 - Render 9:16 H.264 MP4 with scene-aware reframing and loudness normalization. Burned captions are disabled by default.
 - Generate a relevant YouTube title, description, and tags for every newly analyzed candidate, with an optional per-video genre hint for manual analyses.
 - Preview, approve, reject, regenerate, open, or trace a clip back to its source in the review queue.
+- Seek by clicking the normal playback timeline and adjust the final cut with a separate two-handle timeline inside a 30-second source buffer on either side.
+- Re-render only the chosen range on approval or publishing and remove the padded review asset afterward.
 - Keep each review queue separated by a persistent per-channel selector.
 - Permanently remove a review item and its local file from the right-click menu, including recovery from files deleted outside ClipRadar.
 - Edit Gemini metadata, upload immediately, or choose a scheduled public release from the review flow.
@@ -80,7 +83,7 @@ python -m pytest -q
 python -m clipradar --self-test
 ```
 
-Tests cover persistence and migration, secure-secret separation, deterministic sequential scheduling, channel-filtered review, local candidate selection, Gemini's structured metadata/framing schemas, protected AI-assisted framing regeneration, real FFmpeg focus and gaming-split rendering, the full pipeline through review, mocked resumable YouTube upload/scheduling, UI navigation, and the packaged executable.
+Tests cover persistence and migration, secure-secret separation, deterministic sequential scheduling, channel browsing, channel-filtered review, buffered manual trimming, local candidate selection, Gemini's structured metadata/semantic-framing schemas, automatic and manual AI framing checks, real FFmpeg focus and fixed-proportion gaming-split rendering, the full pipeline through review, mocked resumable YouTube upload/scheduling, UI navigation, and the packaged executable.
 
 ## Runtime data
 

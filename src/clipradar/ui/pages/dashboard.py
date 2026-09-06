@@ -42,7 +42,7 @@ class MetricCard(QWidget):
             self.detail.setText(detail)
 
 
-class DashboardPage(QWidget):
+class MonitoringPage(QWidget):
     check_requested = Signal()
 
     def __init__(self, repositories: Repositories, parent: QWidget | None = None):

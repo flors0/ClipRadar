@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 SCHEMA = """
@@ -85,7 +85,15 @@ CREATE TABLE IF NOT EXISTS clip_candidates (
     facecam_x REAL,
     facecam_y REAL,
     facecam_width REAL,
-    facecam_height REAL
+    facecam_height REAL,
+    gameplay_x REAL,
+    gameplay_y REAL,
+    gameplay_width REAL,
+    gameplay_height REAL,
+    hud_x REAL,
+    hud_y REAL,
+    hud_width REAL,
+    hud_height REAL
 );
 
 CREATE TABLE IF NOT EXISTS rendered_clips (
@@ -97,7 +105,9 @@ CREATE TABLE IF NOT EXISTS rendered_clips (
     format TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'Ready',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    buffer_start_seconds REAL,
+    buffer_end_seconds REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_clips_status ON rendered_clips(status, created_at DESC);
@@ -214,6 +224,35 @@ class Database:
             video_columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_videos)")}
             if "category_id" not in video_columns:
                 connection.execute("ALTER TABLE source_videos ADD COLUMN category_id TEXT")
+        if version < 4:
+            candidate_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(clip_candidates)")
+            }
+            region_columns = (
+                "gameplay_x", "gameplay_y", "gameplay_width", "gameplay_height",
+                "hud_x", "hud_y", "hud_width", "hud_height",
+            )
+            for name in region_columns:
+                if name not in candidate_columns:
+                    connection.execute(f"ALTER TABLE clip_candidates ADD COLUMN {name} REAL")
+            clip_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(rendered_clips)")
+            }
+            for name in ("buffer_start_seconds", "buffer_end_seconds"):
+                if name not in clip_columns:
+                    connection.execute(f"ALTER TABLE rendered_clips ADD COLUMN {name} REAL")
+            connection.execute(
+                """UPDATE rendered_clips
+                   SET buffer_start_seconds = (
+                           SELECT COALESCE(x.refined_start_seconds, x.start_seconds)
+                           FROM clip_candidates x WHERE x.id = rendered_clips.candidate_id
+                       ),
+                       buffer_end_seconds = (
+                           SELECT COALESCE(x.refined_end_seconds, x.end_seconds)
+                           FROM clip_candidates x WHERE x.id = rendered_clips.candidate_id
+                       )
+                   WHERE status = 'Ready' AND buffer_start_seconds IS NULL"""
+            )
         connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     @contextmanager

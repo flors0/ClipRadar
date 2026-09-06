@@ -22,14 +22,16 @@ from clipradar.app.paths import resource_path
 from clipradar.app.services import AppServices
 from clipradar.ui.common import muted_label
 from clipradar.ui.pages.channels import ChannelsPage
-from clipradar.ui.pages.dashboard import DashboardPage
+from clipradar.ui.pages.dashboard import MonitoringPage
 from clipradar.ui.pages.publishing import PublishingPage
 from clipradar.ui.pages.review import ReviewPage
 from clipradar.ui.pages.settings import SettingsPage
+from clipradar.ui.pages.video_dashboard import VideoDashboardPage
 
 
 PAGE_INFO = [
-    ("Dashboard", "A quiet overview of monitoring, processing, and review."),
+    ("Dashboard", "Browse recent uploads from your selected channel."),
+    ("Monitoring", "A quiet overview of monitoring, processing, and review."),
     ("Channels", "Choose sources and trigger focused analysis."),
     ("Review", "Watch each finished clip and make one clear decision."),
     ("Publishing", "Track uploads and scheduled YouTube releases."),
@@ -42,14 +44,17 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.services = services
         self.coordinator = BackgroundCoordinator(services, self)
+        self._connections_ready = False
         self.setWindowTitle("ClipRadar")
         self.setWindowIcon(QIcon(str(resource_path("resources/logo.svg"))))
         self.resize(1440, 900)
         self.setMinimumSize(1100, 720)
         self._build_ui()
         self._connect()
+        self._connections_ready = True
         self.refresh_all()
         if start_background:
+            QTimer.singleShot(0, self.dashboard.request_current)
             self.coordinator.start()
 
     def _build_ui(self) -> None:
@@ -81,7 +86,7 @@ class MainWindow(QMainWindow):
         self.nav_group = QButtonGroup(self)
         self.nav_group.setExclusive(True)
         self.nav_buttons: list[QPushButton] = []
-        icons = ["⌂", "◉", "▶", "↑", "⚙"]
+        icons = ["⌂", "◌", "◉", "▶", "↑", "⚙"]
         for index, ((title, _), icon) in enumerate(zip(PAGE_INFO, icons, strict=True)):
             button = QPushButton(f"{icon}    {title}")
             button.setObjectName("NavButton")
@@ -93,7 +98,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.3.2")
+        version = QLabel("v0.4.0")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -122,7 +127,11 @@ class MainWindow(QMainWindow):
         content_layout.addWidget(self.pipeline_progress)
 
         self.pages = QStackedWidget()
-        self.dashboard = DashboardPage(self.services.repositories)
+        self.dashboard = VideoDashboardPage(
+            self.services.repositories.channels,
+            self.services.settings,
+        )
+        self.monitoring = MonitoringPage(self.services.repositories)
         self.channels = ChannelsPage(self.services.repositories.channels, self.services.settings)
         self.review = ReviewPage(
             self.services.repositories.clips,
@@ -132,7 +141,14 @@ class MainWindow(QMainWindow):
         )
         self.publishing = PublishingPage(self.services.repositories.publish)
         self.settings = SettingsPage(self.services.settings, self.services.paths, self.services.publishing)
-        for page in (self.dashboard, self.channels, self.review, self.publishing, self.settings):
+        for page in (
+            self.dashboard,
+            self.monitoring,
+            self.channels,
+            self.review,
+            self.publishing,
+            self.settings,
+        ):
             self.pages.addWidget(page)
         content_layout.addWidget(self.pages, 1)
 
@@ -149,7 +165,14 @@ class MainWindow(QMainWindow):
         self._set_page(0)
 
     def _connect(self) -> None:
-        self.dashboard.check_requested.connect(self._check_channels)
+        self.dashboard.load_requested.connect(self._load_dashboard_videos)
+        self.dashboard.analyze_requested.connect(
+            lambda channel_id, url, category_id: self._background(
+                f"specific:{channel_id}",
+                lambda: self.services.channels.analyze_specific(channel_id, url, category_id),
+            )
+        )
+        self.monitoring.check_requested.connect(self._check_channels)
         self.channels.add_requested.connect(self._add_channel)
         self.channels.toggle_requested.connect(
             lambda channel_id, enabled: self._background(
@@ -178,6 +201,7 @@ class MainWindow(QMainWindow):
         self.review.delete_requested.connect(self._delete_clip)
         self.review.regenerate_requested.connect(self._regenerate)
         self.review.publish_requested.connect(self._publish)
+        self.review.trim_requested.connect(self._update_trim)
         self.publishing.retry_requested.connect(self._retry_publish)
         self.publishing.cancel_requested.connect(self._cancel_publish)
         self.settings.saved.connect(self._toast)
@@ -203,7 +227,8 @@ class MainWindow(QMainWindow):
         self.coordinator.job_progress.connect(self._job_progress)
 
     def refresh_all(self) -> None:
-        self.dashboard.refresh()
+        self.dashboard.refresh_channels()
+        self.monitoring.refresh()
         self.channels.refresh()
         self.review.refresh()
         self.publishing.refresh()
@@ -214,20 +239,34 @@ class MainWindow(QMainWindow):
         self.page_title.setText(title)
         self.page_subtitle.setText(subtitle)
         self.nav_buttons[index].setChecked(True)
-        if index == 2:
-            self.review.refresh()
+        if index == 0:
+            self.dashboard.refresh_channels()
+            if self._connections_ready:
+                self.dashboard.request_current()
+        elif index == 1:
+            self.monitoring.refresh()
         elif index == 3:
-            self.publishing.refresh()
+            self.review.refresh()
         elif index == 4:
+            self.publishing.refresh()
+        elif index == 5:
             self.settings.refresh_publishing()
 
-    def _background(self, key: str, operation: Callable[[], object]) -> None:
-        if not self.coordinator.execute(key, operation):
+    def _background(self, key: str, operation: Callable[[], object]) -> bool:
+        started = self.coordinator.execute(key, operation)
+        if not started:
             self._toast("That task is already running.", error=True)
+        return started
 
     def _check_channels(self) -> None:
-        self.dashboard.set_monitoring_busy(True)
+        self.monitoring.set_monitoring_busy(True)
         self.coordinator.check_channels()
+
+    def _load_dashboard_videos(self, channel_id: int) -> None:
+        self._background(
+            f"feed:{channel_id}",
+            lambda: self.services.channels.dashboard_videos(channel_id),
+        )
 
     def _add_channel(self, identifier: str) -> None:
         self._background("add_channel", lambda: self.services.channels.add_channel(identifier))
@@ -241,12 +280,8 @@ class MainWindow(QMainWindow):
             self._toast(str(exc), error=True)
 
     def _approve(self, clip_id: int) -> None:
-        try:
-            self.services.review.approve(clip_id)
-            self.refresh_all()
-            self._toast("Clip approved")
-        except Exception as exc:
-            self._toast(str(exc), error=True)
+        if self._background(f"approve:{clip_id}", lambda: self.services.review.approve(clip_id)):
+            self._toast("Rendering final cut…")
 
     def _reject(self, clip_id: int) -> None:
         try:
@@ -270,14 +305,21 @@ class MainWindow(QMainWindow):
             self._toast("Gemini is re-analyzing the framing…")
 
     def _publish(self, clip_id: int, metadata: dict) -> None:
+        if self._background(
+            f"publish_prepare:{clip_id}",
+            lambda: self._finalize_and_queue_publish(clip_id, metadata),
+        ):
+            self._toast("Rendering final cut and preparing upload…")
+
+    def _finalize_and_queue_publish(self, clip_id: int, metadata: dict):
+        self.services.review.finalize_for_publish(clip_id)
+        return self.services.publishing.queue_clip(clip_id=clip_id, **metadata)
+
+    def _update_trim(self, clip_id: int, start_seconds: float, end_seconds: float) -> None:
         try:
-            self.services.publishing.queue_clip(clip_id=clip_id, **metadata)
+            self.services.review.update_trim(clip_id, start_seconds, end_seconds)
         except Exception as exc:
             self._toast(str(exc), error=True)
-            return
-        self.refresh_all()
-        self._set_page(3)
-        self._toast("Upload queued" if not metadata.get("scheduled_for") else "Scheduled upload queued")
 
     def _retry_publish(self, job_id: str) -> None:
         try:
@@ -311,9 +353,12 @@ class MainWindow(QMainWindow):
 
     def _task_succeeded(self, key: str, result: object) -> None:
         if key == "monitoring":
-            self.dashboard.set_monitoring_busy(False)
+            self.monitoring.set_monitoring_busy(False)
             discovered = getattr(result, "videos_discovered", 0)
             self._toast(f"Channel check complete · {discovered} new video{'s' if discovered != 1 else ''}")
+        elif key.startswith("feed:"):
+            channel_id, videos = result
+            self.dashboard.set_videos(int(channel_id), list(videos))
         elif key == "add_channel":
             self.channels.finish_add(True)
             self._toast(f"Added {getattr(result, 'name', 'channel')}")
@@ -333,6 +378,11 @@ class MainWindow(QMainWindow):
             self._toast(f"Analysis complete · {result} clip{'s' if result != 1 else ''} ready")
         elif key.startswith("regenerate:"):
             self._toast("New render ready for review")
+        elif key.startswith("approve:"):
+            self._toast("Final cut rendered and approved")
+        elif key.startswith("publish_prepare:"):
+            self._set_page(4)
+            self._toast("YouTube upload queued")
         elif key.startswith(("latest:", "specific:")):
             self._toast("Analysis queued")
         elif key == "publishing":
@@ -346,7 +396,9 @@ class MainWindow(QMainWindow):
 
     def _task_failed(self, key: str, message: str) -> None:
         if key == "monitoring":
-            self.dashboard.set_monitoring_busy(False)
+            self.monitoring.set_monitoring_busy(False)
+        elif key.startswith("feed:"):
+            self.dashboard.set_error(int(key.split(":", 1)[1]), message)
         elif key == "add_channel":
             self.channels.finish_add(False)
         elif key == "ai_test":

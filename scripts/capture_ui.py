@@ -28,6 +28,7 @@ from clipradar.models import (
 from clipradar.settings.secrets import MemorySecretStore
 from clipradar.ui.main_window import MainWindow
 from clipradar.ui.pages.review import PublishDialog
+from clipradar.youtube.client import RemoteVideo
 
 
 def main() -> int:
@@ -99,8 +100,10 @@ def main() -> int:
             int(candidates[0].id),
             int(source.id),
             str(clip_path),
-            31,
+            91,
             "Vertical 9:16",
+            buffer_start_seconds=97,
+            buffer_end_seconds=188,
         ))
         queued_clip = services.repositories.clips.add(RenderedClip(
             None,
@@ -148,12 +151,35 @@ def main() -> int:
         services.repositories.activity.add("Monitoring started")
         services.repositories.activity.add("Added channel Creator Channel", "success")
         window = MainWindow(services, start_background=False)
+        window.dashboard.set_videos(int(channel.id), [
+            RemoteVideo(
+                "demo-video",
+                "The Minecraft Save Nobody Expected",
+                "https://youtube.com/watch?v=demo",
+                channel.channel_id,
+                published_at="2026-09-06T13:20:00+00:00",
+            ),
+            RemoteVideo(
+                "demo-video-2",
+                "This Strategy Looked Impossible Until It Worked",
+                "https://youtube.com/watch?v=demo2",
+                channel.channel_id,
+                published_at="2026-09-05T18:10:00+00:00",
+            ),
+            RemoteVideo(
+                "demo-video-3",
+                "The Most Unexpected Ending of the Stream",
+                "https://youtube.com/watch?v=demo3",
+                channel.channel_id,
+                published_at="2026-09-03T11:00:00+00:00",
+            ),
+        ])
         window.resize(1440, 900)
         window.show()
         app.processEvents()
         args.output.parent.mkdir(parents=True, exist_ok=True)
         window.grab().save(str(args.output))
-        window._set_page(2)
+        window._set_page(3)
         app.processEvents()
         window.grab().save(str(args.output.with_stem(f"{args.output.stem}-review")))
         publish_dialog = PublishDialog(window.review.current, services.publishing, window)
@@ -161,10 +187,10 @@ def main() -> int:
         app.processEvents()
         publish_dialog.grab().save(str(args.output.with_stem(f"{args.output.stem}-publish-dialog")))
         publish_dialog.close()
-        window._set_page(3)
+        window._set_page(4)
         app.processEvents()
         window.grab().save(str(args.output.with_stem(f"{args.output.stem}-publishing")))
-        window._set_page(4)
+        window._set_page(5)
         window.settings.nav.setCurrentRow(5)
         app.processEvents()
         window.grab().save(str(args.output.with_stem(f"{args.output.stem}-settings")))

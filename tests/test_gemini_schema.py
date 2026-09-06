@@ -24,6 +24,8 @@ def test_clip_evaluation_schema_is_accepted_by_google_sdk():
     assert "tags" in schema.properties
     assert "reframe_mode" in schema.properties
     assert "focus_x" in schema.properties
+    assert "gameplay_present" in schema.properties
+    assert "hud_width" in schema.properties
 
 
 def test_framing_schema_is_accepted_by_google_sdk():
@@ -32,6 +34,8 @@ def test_framing_schema_is_accepted_by_google_sdk():
     assert schema is not None
     assert schema.properties is not None
     assert "facecam_present" in schema.properties
+    assert "gameplay_present" in schema.properties
+    assert "hud_present" in schema.properties
     assert schema.properties["focus_x"].minimum == 0
     assert schema.properties["focus_x"].maximum == 1000
 
@@ -108,6 +112,16 @@ def _valid_framing_payload(mode="focus"):
         "facecam_y": 40 if mode == "gaming_split" else 0,
         "facecam_width": 180 if mode == "gaming_split" else 0,
         "facecam_height": 240 if mode == "gaming_split" else 0,
+        "gameplay_present": mode == "gaming_split",
+        "gameplay_x": 0,
+        "gameplay_y": 0,
+        "gameplay_width": 1000 if mode == "gaming_split" else 0,
+        "gameplay_height": 1000 if mode == "gaming_split" else 0,
+        "hud_present": mode == "gaming_split",
+        "hud_x": 760 if mode == "gaming_split" else 0,
+        "hud_y": 80 if mode == "gaming_split" else 0,
+        "hud_width": 200 if mode == "gaming_split" else 0,
+        "hud_height": 240 if mode == "gaming_split" else 0,
     }
 
 
@@ -224,6 +238,20 @@ def test_facecam_gameplay_requires_a_real_facecam_box(monkeypatch, tmp_path):
             [_response(parsed=payload)],
             requested_mode="gaming_split",
         )
+
+
+def test_framing_result_preserves_gameplay_and_hud_regions(monkeypatch, tmp_path):
+    result, _fake = _analyze_framing(
+        monkeypatch,
+        tmp_path,
+        "gemini-3.5-flash-lite",
+        [_response(parsed=_valid_framing_payload("gaming_split"))],
+        requested_mode="gaming_split",
+    )
+
+    assert result.gameplay_width == pytest.approx(1.0)
+    assert result.hud_x == pytest.approx(0.76)
+    assert result.hud_width == pytest.approx(0.20)
 
 
 def test_incomplete_framing_response_retries_with_compact_larger_budget(monkeypatch, tmp_path):

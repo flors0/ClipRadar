@@ -24,7 +24,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
-    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -35,6 +34,7 @@ from clipradar.settings.models import UIStateSettings
 from clipradar.settings.service import SettingsService
 from clipradar.storage.repositories import ChannelRepository, ClipRepository
 from clipradar.ui.common import card_layout, format_time, muted_label, status_pill, title_label
+from clipradar.ui.timeline import ClickableSlider, TrimRangeSlider
 
 
 REFRAME_OPTIONS = [
@@ -55,7 +55,7 @@ class ReviewItemWidget(QWidget):
         top = QHBoxLayout()
         channel = QLabel(clip["channel_name"])
         channel.setStyleSheet("font-weight:650")
-        score = status_pill(f"{round(clip['ai_score'] or 0)} score")
+        score = status_pill(f"{round(clip['ai_score'] or 0)}")
         top.addWidget(channel)
         top.addStretch(1)
         top.addWidget(score)
@@ -64,7 +64,9 @@ class ReviewItemWidget(QWidget):
         title.setWordWrap(True)
         title.setMaximumHeight(42)
         layout.addWidget(title)
-        footer = muted_label(f"{format_time(clip['duration_seconds'])}  ·  {clip['format']}")
+        start = _available_value(clip["refined_start_seconds"], clip["start_seconds"])
+        end = _available_value(clip["refined_end_seconds"], clip["end_seconds"])
+        footer = muted_label(f"{format_time(end - start)}  ·  {clip['format']}")
         if not Path(clip["file_path"]).is_file():
             footer.setText(f"{footer.text()}  ·  File missing")
             footer.setStyleSheet("color:#ff7070")
@@ -185,6 +187,7 @@ class ReviewPage(QWidget):
     delete_requested = Signal(int)
     regenerate_requested = Signal(int, str)
     publish_requested = Signal(int, dict)
+    trim_requested = Signal(int, float, float)
 
     def __init__(
         self,
@@ -201,6 +204,9 @@ class ReviewPage(QWidget):
         self.publishing = publishing
         self.records: list[dict] = []
         self.current: dict | None = None
+        self._buffer_start_seconds = 0.0
+        self._trim_start_ms = 0
+        self._trim_end_ms = 0
         self.selected_channel_id = self.settings.ui_state().review_channel_id
         self.audio = QAudioOutput(self)
         self.audio.setVolume(0.85)
@@ -214,7 +220,7 @@ class ReviewPage(QWidget):
         root.addWidget(splitter)
 
         left, left_layout = card_layout(object_name="Card")
-        left.setMinimumWidth(260)
+        left.setMinimumWidth(290)
         header = QHBoxLayout()
         header.addWidget(title_label("Ready for review"))
         header.addStretch(1)
@@ -259,15 +265,34 @@ class ReviewPage(QWidget):
         self.play.setFixedWidth(72)
         self.play.clicked.connect(self._toggle_play)
         self.position = muted_label("0:00")
-        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider = ClickableSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 0)
         self.slider.sliderMoved.connect(self.player.setPosition)
+        self.slider.seek_requested.connect(self.player.setPosition)
         self.duration = muted_label("0:00")
         controls.addWidget(self.play)
         controls.addWidget(self.position)
         controls.addWidget(self.slider, 1)
         controls.addWidget(self.duration)
         right_layout.addLayout(controls)
+
+        trim_row = QHBoxLayout()
+        trim_row.setSpacing(9)
+        trim_row.addWidget(muted_label("Final cut"))
+        self.trim_start = muted_label("0:00.0")
+        self.trim_start.setMinimumWidth(52)
+        trim_row.addWidget(self.trim_start)
+        self.trim = TrimRangeSlider()
+        self.trim.range_changing.connect(self._trim_changing)
+        self.trim.range_changed.connect(self._trim_changed)
+        self.trim.preview_requested.connect(self.player.setPosition)
+        trim_row.addWidget(self.trim, 1)
+        self.trim_end = muted_label("0:00.0")
+        self.trim_end.setMinimumWidth(52)
+        trim_row.addWidget(self.trim_end)
+        right_layout.addLayout(trim_row)
+        self.trim_hint = muted_label("Grey areas are the editable 30-second source buffer.")
+        right_layout.addWidget(self.trim_hint)
         self.player.positionChanged.connect(self._position_changed)
         self.player.durationChanged.connect(self._duration_changed)
         self.player.playbackStateChanged.connect(self._playback_changed)
@@ -332,6 +357,7 @@ class ReviewPage(QWidget):
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 7)
+        splitter.setSizes([300, 900])
         self._set_actions(False, False)
 
     def refresh(self) -> None:
@@ -386,6 +412,8 @@ class ReviewPage(QWidget):
             self.timestamp.setText("Timestamp —")
             self.clip_duration.setText("Duration —")
             self.metadata_status.setText("Metadata —")
+            self.trim.set_range(0, 0)
+            self.trim.setEnabled(False)
             self._set_actions(False, False)
 
     def _channel_changed(self, index: int) -> None:
@@ -393,7 +421,11 @@ class ReviewPage(QWidget):
         if channel_id is None:
             return
         self.selected_channel_id = int(channel_id)
-        self.settings.save_ui_state(UIStateSettings(review_channel_id=self.selected_channel_id))
+        current = self.settings.ui_state()
+        self.settings.save_ui_state(UIStateSettings(
+            review_channel_id=self.selected_channel_id,
+            dashboard_channel_id=current.dashboard_channel_id,
+        ))
         self.current = None
         self.refresh()
 
@@ -410,10 +442,33 @@ class ReviewPage(QWidget):
         if not has_file:
             reason = f"The rendered file was removed outside ClipRadar. You can reject or permanently delete this entry.\n\n{reason}"
         self.detail_reason.setText(reason)
-        start = self.current["refined_start_seconds"] or self.current["start_seconds"]
-        end = self.current["refined_end_seconds"] or self.current["end_seconds"]
+        start = _available_value(
+            self.current["refined_start_seconds"], self.current["start_seconds"]
+        )
+        end = _available_value(
+            self.current["refined_end_seconds"], self.current["end_seconds"]
+        )
+        buffer_start = self.current.get("buffer_start_seconds")
+        buffer_end = self.current.get("buffer_end_seconds")
+        has_buffer = buffer_start is not None and buffer_end is not None
+        self._buffer_start_seconds = float(buffer_start if has_buffer else start)
+        buffer_duration_ms = round(
+            max(0.0, float(buffer_end if has_buffer else end) - self._buffer_start_seconds) * 1000
+        )
+        self._trim_start_ms = round((float(start) - self._buffer_start_seconds) * 1000)
+        self._trim_end_ms = round((float(end) - self._buffer_start_seconds) * 1000)
+        self.trim.set_range(0, buffer_duration_ms)
+        self.trim.set_selection(self._trim_start_ms, self._trim_end_ms)
+        self.trim.setEnabled(has_file and has_buffer)
+        self.trim_hint.setText(
+            "Grey areas are the editable 30-second source buffer."
+            if has_buffer and buffer_duration_ms > self._trim_end_ms - self._trim_start_ms
+            else "This clip can be shortened within its available review range."
+        )
+        self._update_trim_labels()
+        self.player.setPosition(self._trim_start_ms)
         self.timestamp.setText(f"Source {format_time(start)} → {format_time(end)}")
-        self.clip_duration.setText(f"Clip {format_time(self.current['duration_seconds'])}")
+        self.clip_duration.setText(f"Clip {format_time(end - start)}")
         if self.current.get("status") == "Regenerating":
             self._set_status("Regenerating…", "#caff00")
         else:
@@ -445,6 +500,7 @@ class ReviewPage(QWidget):
         self.publish.setEnabled(can_decide and has_file and has_account)
         self.publish.setToolTip("" if has_account else "Connect YouTube under Settings → Publishing first")
         self.reframe.setEnabled(can_decide and has_file)
+        self.trim.setEnabled(can_decide and has_file and self.current.get("buffer_start_seconds") is not None)
 
     def _set_status(self, text: str, color: str) -> None:
         self.status.setText(f"  ●  {text}  ")
@@ -508,6 +564,8 @@ class ReviewPage(QWidget):
         if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
             self.player.pause()
         else:
+            if self.player.position() < self._trim_start_ms or self.player.position() >= self._trim_end_ms:
+                self.player.setPosition(self._trim_start_ms)
             self.player.play()
 
     def _playback_changed(self, state: QMediaPlayer.PlaybackState) -> None:
@@ -517,10 +575,42 @@ class ReviewPage(QWidget):
         if not self.slider.isSliderDown():
             self.slider.setValue(position)
         self.position.setText(format_time(position / 1000))
+        if (
+            self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            and self._trim_end_ms > self._trim_start_ms
+            and position >= self._trim_end_ms
+        ):
+            self.player.pause()
+            self.player.setPosition(self._trim_end_ms)
 
     def _duration_changed(self, duration: int) -> None:
         self.slider.setRange(0, duration)
         self.duration.setText(format_time(duration / 1000))
+
+    def _trim_changing(self, start_ms: int, end_ms: int) -> None:
+        self._trim_start_ms = start_ms
+        self._trim_end_ms = end_ms
+        self._update_trim_labels()
+
+    def _trim_changed(self, start_ms: int, end_ms: int) -> None:
+        self._trim_changing(start_ms, end_ms)
+        if not self.current:
+            return
+        absolute_start = self._buffer_start_seconds + start_ms / 1000
+        absolute_end = self._buffer_start_seconds + end_ms / 1000
+        self.trim_requested.emit(int(self.current["id"]), absolute_start, absolute_end)
+
+    def _update_trim_labels(self) -> None:
+        absolute_start = self._buffer_start_seconds + self._trim_start_ms / 1000
+        absolute_end = self._buffer_start_seconds + self._trim_end_ms / 1000
+        self.trim_start.setText(_format_precise_time(absolute_start))
+        self.trim_end.setText(_format_precise_time(absolute_end))
+        self.timestamp.setText(
+            f"Source {format_time(absolute_start)} → {format_time(absolute_end)}"
+        )
+        self.clip_duration.setText(
+            f"Clip {_format_precise_time((self._trim_end_ms - self._trim_start_ms) / 1000)}"
+        )
 
     def _open_file(self) -> None:
         if self.current:
@@ -529,3 +619,13 @@ class ReviewPage(QWidget):
     def _open_source(self) -> None:
         if self.current:
             QDesktopServices.openUrl(QUrl(self.current["source_url"]))
+
+
+def _format_precise_time(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    minutes = int(seconds // 60)
+    return f"{minutes}:{seconds - minutes * 60:04.1f}"
+
+
+def _available_value(preferred: float | None, fallback: float) -> float:
+    return float(preferred if preferred is not None else fallback)

@@ -36,6 +36,37 @@ class FakeGemini:
             facecam_y=0.04,
             facecam_width=0.19,
             facecam_height=0.24,
+            gameplay_x=0.0,
+            gameplay_y=0.0,
+            gameplay_width=1.0,
+            gameplay_height=1.0,
+            hud_x=0.78,
+            hud_y=0.08,
+            hud_width=0.18,
+            hud_height=0.25,
+        )
+
+    def analyze_framing(self, **kwargs):
+        return FramingResult(
+            reason="Facecam, nearby stats, and gameplay are all visible in stable regions.",
+            reframe_mode=kwargs["requested_mode"],
+            focus_x=0.62,
+            focus_y=0.56,
+            facecam_x=0.02,
+            facecam_y=0.04,
+            facecam_width=0.19,
+            facecam_height=0.24,
+            input_tokens=50,
+            output_tokens=10,
+            estimated_cost_eur=0.0001,
+            gameplay_x=0.0,
+            gameplay_y=0.0,
+            gameplay_width=1.0,
+            gameplay_height=1.0,
+            hud_x=0.78,
+            hud_y=0.08,
+            hud_width=0.18,
+            hud_height=0.25,
         )
 
 
@@ -147,6 +178,40 @@ def test_renderer_uses_gemini_facecam_and_scene_focus(services, synthetic_video:
     assert not Path(rendered.file_path).with_suffix(".ass").exists()
 
 
+def test_gaming_split_keeps_fixed_proportions_and_adjacent_hud(services, synthetic_video: Path):
+    candidate = ClipCandidate(
+        None,
+        1,
+        2,
+        10,
+        90,
+        {},
+        reframe_mode="gaming_split",
+        focus_x=0.6,
+        focus_y=0.5,
+        facecam_x=0.02,
+        facecam_y=0.05,
+        facecam_width=0.18,
+        facecam_height=0.24,
+        gameplay_x=0.0,
+        gameplay_y=0.0,
+        gameplay_width=1.0,
+        gameplay_height=1.0,
+        hud_x=0.76,
+        hud_y=0.08,
+        hud_width=0.20,
+        hud_height=0.24,
+    )
+    settings = ClipSettings(render_width=360, render_height=640, captions_enabled=False)
+    plan = ClipRenderer._video_filter(640, 360, candidate, settings, str(synthetic_video))
+
+    assert "scale=360:186" in plan.value
+    assert "scale=360:454" in plan.value
+    face_crop = plan.value.split("[face_source]crop=", 1)[1].split(",scale", 1)[0]
+    face_width = int(face_crop.split(":")[0])
+    assert face_width > 500
+
+
 def test_complete_local_pipeline_reaches_review_queue(services, synthetic_video: Path, transcript_file: Path):
     services.settings.save_clips(ClipSettings(
         minimum_duration=5,
@@ -179,10 +244,66 @@ def test_complete_local_pipeline_reaches_review_queue(services, synthetic_video:
     assert all("Minecraft" in item["ai_tags_json"] for item in queue)
     assert all(item["reframe_mode"] == "gaming_split" for item in queue)
     usage = services.repositories.usage.get_today()
-    assert usage["requests"] == rendered_count * 2
-    assert usage["estimated_cost_eur"] == pytest.approx(rendered_count * 0.0002)
+    assert usage["requests"] == rendered_count * 3
+    assert usage["estimated_cost_eur"] == pytest.approx(rendered_count * 0.0003)
     messages = [item["message"] for item in services.repositories.activity.recent(100)]
     assert any("Candidate summary" in message and "selected" in message for message in messages)
+    assert any("Initial framing verified" in message for message in messages)
+
+
+def test_review_trim_uses_buffer_then_approve_keeps_only_final_cut(
+    services,
+    synthetic_video: Path,
+    tmp_path: Path,
+):
+    services.settings.save_clips(ClipSettings(
+        minimum_duration=5,
+        target_duration=8,
+        maximum_duration=12,
+        render_width=360,
+        render_height=640,
+        captions_enabled=False,
+    ))
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_TRIM", "Trim Channel", "", "https://youtube.test/trim",
+        min_duration_seconds=5, target_duration_seconds=8, max_duration_seconds=12,
+    ))
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "trim-video",
+        "Trim Source",
+        "https://youtube.test/watch?v=trim",
+        duration_seconds=18,
+        local_path=str(synthetic_video),
+    ))
+    candidate = services.repositories.candidates.replace_for_video(int(source.id), [
+        ClipCandidate(None, int(source.id), 5, 13, 90, {}, refined_start_seconds=5, refined_end_seconds=13)
+    ])[0]
+    buffered = services.pipeline.renderer.render_review_buffer(
+        source,
+        candidate,
+        services.settings.clips(),
+        output_override=str(tmp_path),
+    )
+    saved = services.repositories.clips.add(buffered)
+    buffered_path = Path(saved.file_path)
+
+    assert saved.buffer_start_seconds == pytest.approx(0)
+    assert saved.buffer_end_seconds == pytest.approx(18)
+    services.review.update_trim(int(saved.id), 6.25, 15.0)
+    services.review.approve(int(saved.id))
+
+    finalized = services.repositories.clips.get(int(saved.id))
+    updated_candidate = services.repositories.candidates.get(int(candidate.id))
+    assert finalized.status == ClipStatus.APPROVED
+    assert finalized.buffer_start_seconds is None
+    assert finalized.buffer_end_seconds is None
+    assert 8.2 <= finalized.duration_seconds <= 9.3
+    assert updated_candidate.render_start == pytest.approx(6.25)
+    assert updated_candidate.render_end == pytest.approx(15.0)
+    assert Path(finalized.file_path).is_file()
+    assert not buffered_path.exists()
 
 
 def test_valid_zero_clip_result_explains_why_nothing_reached_review(

@@ -81,6 +81,10 @@ class ChannelService:
         source = self._store_remote(channel, remote, category_id=category_id)
         return self._queue(source, manual=True, scheduled_at=utc_now())
 
+    def dashboard_videos(self, channel_id: int, limit: int = 18) -> tuple[int, list[RemoteVideo]]:
+        channel = self._require_channel(channel_id)
+        return int(channel.id), self.youtube.list_recent_videos(channel.url, limit)
+
     def scan_all(self) -> ScanResult:
         config = self.settings.monitoring()
         result = ScanResult(errors=[])

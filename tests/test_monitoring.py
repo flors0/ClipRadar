@@ -67,6 +67,18 @@ def test_manual_specific_video_stores_selected_genre(services):
     assert source.category_id == "24"
 
 
+def test_dashboard_feed_loads_metadata_without_downloading_video(services):
+    youtube = FakeYouTube()
+    channels = ChannelService(services.repositories, services.settings, youtube)
+    channel = channels.add_channel("@fake")
+    youtube.items = [youtube.video("feed-1"), youtube.video("feed-2")]
+
+    channel_id, videos = channels.dashboard_videos(int(channel.id), limit=18)
+
+    assert channel_id == int(channel.id)
+    assert [video.video_id for video in videos] == ["feed-1", "feed-2"]
+
+
 def test_analysis_queue_has_deterministic_sequential_positions(services):
     channel = services.repositories.channels.add(Channel(
         None, "UC_QUEUE", "Queue Channel", "", "https://youtube.test/queue"

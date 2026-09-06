@@ -132,8 +132,7 @@ class YouTubeClient:
             video_id = entry.get("id")
             if not video_id:
                 continue
-            timestamp = entry.get("timestamp") or entry.get("release_timestamp")
-            published = datetime.fromtimestamp(timestamp, timezone.utc).isoformat() if timestamp else None
+            published = _published_at(entry)
             thumbnails = entry.get("thumbnails") or []
             thumbnail = thumbnails[-1].get("url", "") if thumbnails else entry.get("thumbnail", "")
             videos.append(RemoteVideo(
@@ -292,3 +291,16 @@ class YouTubeClient:
         except (OSError, json.JSONDecodeError):
             logger.warning("Could not read cached YouTube metadata from %s", info_path.name)
             return []
+
+
+def _published_at(entry: dict[str, Any]) -> str | None:
+    timestamp = entry.get("timestamp") or entry.get("release_timestamp")
+    if timestamp:
+        return datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
+    upload_date = str(entry.get("upload_date") or "")
+    if len(upload_date) == 8 and upload_date.isdigit():
+        try:
+            return datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
+        except ValueError:
+            pass
+    return None

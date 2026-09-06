@@ -13,7 +13,7 @@ from clipradar.storage.database import Database
 def test_database_and_settings_survive_restart(services):
     services.settings.save_ai(AISettings(model="gemini-3.8-flash", minimum_ai_score=70))
     services.settings.save_clips(ClipSettings(minimum_duration=10, target_duration=20, maximum_duration=30))
-    services.settings.save_ui_state(UIStateSettings(review_channel_id=7))
+    services.settings.save_ui_state(UIStateSettings(review_channel_id=7, dashboard_channel_id=9))
     saved = services.repositories.channels.add(Channel(
         id=None,
         channel_id="UC_TEST_CHANNEL_00000001",
@@ -25,6 +25,7 @@ def test_database_and_settings_survive_restart(services):
     assert restarted.settings.ai().model == "gemini-3.8-flash"
     assert restarted.settings.clips().target_duration == 20
     assert restarted.settings.ui_state().review_channel_id == 7
+    assert restarted.settings.ui_state().dashboard_channel_id == 9
     assert restarted.repositories.channels.get(int(saved.id)).name == "Test Channel"
 
 
@@ -85,7 +86,7 @@ def test_version_one_database_migrates_metadata_publishing_and_disables_captions
             connection.execute("SELECT value_json FROM settings WHERE key = 'clips'").fetchone()["value_json"]
         )
         tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert version == 3
+    assert version == 4
     assert {"ai_title", "ai_tags_json", "reframe_mode", "focus_x", "facecam_x"} <= columns
     assert {"youtube_accounts", "publish_jobs"} <= tables
     assert settings["captions_enabled"] is False
@@ -109,8 +110,71 @@ def test_version_two_database_adds_source_video_category(tmp_path):
         version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_videos)")}
 
-    assert version == 3
+    assert version == 4
     assert "category_id" in columns
+
+
+def test_version_three_database_adds_review_buffers_and_semantic_regions(tmp_path):
+    path = tmp_path / "version-three.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (version INTEGER NOT NULL);
+            INSERT INTO schema_info(version) VALUES (3);
+            CREATE TABLE clip_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_video_id INTEGER NOT NULL,
+                start_seconds REAL NOT NULL,
+                end_seconds REAL NOT NULL,
+                local_score REAL NOT NULL,
+                signals_json TEXT NOT NULL DEFAULT '{}',
+                ai_score REAL,
+                ai_reason TEXT NOT NULL DEFAULT '',
+                refined_start_seconds REAL,
+                refined_end_seconds REAL,
+                status TEXT NOT NULL DEFAULT 'Detected'
+            );
+            CREATE TABLE rendered_clips (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                candidate_id INTEGER NOT NULL,
+                source_video_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                duration_seconds REAL NOT NULL,
+                format TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Ready',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO clip_candidates
+                (source_video_id, start_seconds, end_seconds, local_score,
+                 refined_start_seconds, refined_end_seconds)
+                VALUES (1, 10, 40, 80, 12, 38);
+            INSERT INTO rendered_clips
+                (candidate_id, source_video_id, file_path, duration_seconds, format,
+                 status, created_at, updated_at)
+                VALUES (1, 1, 'old.mp4', 26, 'Vertical 9:16', 'Ready', '2026-01-01', '2026-01-01');
+            """
+        )
+
+    database = Database(path)
+    database.initialize()
+    with database.connection() as connection:
+        version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
+        candidate_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(clip_candidates)")
+        }
+        clip_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(rendered_clips)")
+        }
+        migrated = connection.execute(
+            "SELECT buffer_start_seconds, buffer_end_seconds FROM rendered_clips WHERE id = 1"
+        ).fetchone()
+
+    assert version == 4
+    assert {"gameplay_x", "gameplay_height", "hud_x", "hud_height"} <= candidate_columns
+    assert {"buffer_start_seconds", "buffer_end_seconds"} <= clip_columns
+    assert migrated["buffer_start_seconds"] == 12
+    assert migrated["buffer_end_seconds"] == 38
 
 
 def test_logging_filter_redacts_google_tokens():

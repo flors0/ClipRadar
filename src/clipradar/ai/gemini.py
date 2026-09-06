@@ -73,6 +73,16 @@ class ClipEvaluation(BaseModel):
     facecam_y: int = Field(default=0, ge=0, le=1000)
     facecam_width: int = Field(default=0, ge=0, le=1000)
     facecam_height: int = Field(default=0, ge=0, le=1000)
+    gameplay_present: bool = False
+    gameplay_x: int = Field(default=0, ge=0, le=1000)
+    gameplay_y: int = Field(default=0, ge=0, le=1000)
+    gameplay_width: int = Field(default=0, ge=0, le=1000)
+    gameplay_height: int = Field(default=0, ge=0, le=1000)
+    hud_present: bool = False
+    hud_x: int = Field(default=0, ge=0, le=1000)
+    hud_y: int = Field(default=0, ge=0, le=1000)
+    hud_width: int = Field(default=0, ge=0, le=1000)
+    hud_height: int = Field(default=0, ge=0, le=1000)
 
 
 class FramingEvaluation(BaseModel):
@@ -85,6 +95,16 @@ class FramingEvaluation(BaseModel):
     facecam_y: int = Field(default=0, ge=0, le=1000)
     facecam_width: int = Field(default=0, ge=0, le=1000)
     facecam_height: int = Field(default=0, ge=0, le=1000)
+    gameplay_present: bool = False
+    gameplay_x: int = Field(default=0, ge=0, le=1000)
+    gameplay_y: int = Field(default=0, ge=0, le=1000)
+    gameplay_width: int = Field(default=0, ge=0, le=1000)
+    gameplay_height: int = Field(default=0, ge=0, le=1000)
+    hud_present: bool = False
+    hud_x: int = Field(default=0, ge=0, le=1000)
+    hud_y: int = Field(default=0, ge=0, le=1000)
+    hud_width: int = Field(default=0, ge=0, le=1000)
+    hud_height: int = Field(default=0, ge=0, le=1000)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +127,14 @@ class EvaluationResult:
     facecam_y: float | None = None
     facecam_width: float | None = None
     facecam_height: float | None = None
+    gameplay_x: float | None = None
+    gameplay_y: float | None = None
+    gameplay_width: float | None = None
+    gameplay_height: float | None = None
+    hud_x: float | None = None
+    hud_y: float | None = None
+    hud_width: float | None = None
+    hud_height: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +151,14 @@ class FramingResult:
     output_tokens: int
     estimated_cost_eur: float
     request_count: int = 1
+    gameplay_x: float | None = None
+    gameplay_y: float | None = None
+    gameplay_width: float | None = None
+    gameplay_height: float | None = None
+    hud_x: float | None = None
+    hud_y: float | None = None
+    hud_width: float | None = None
+    hud_height: float | None = None
 
 
 class GeminiClient:
@@ -267,6 +303,20 @@ class GeminiClient:
         description = _clean_description(evaluation.description)
         tags = tuple(_clean_tags(evaluation.tags))
         facecam = _normalize_facecam(evaluation)
+        gameplay = _normalize_region_values(
+            evaluation.gameplay_x,
+            evaluation.gameplay_y,
+            evaluation.gameplay_width,
+            evaluation.gameplay_height,
+            minimum_size=0.04,
+        ) if evaluation.gameplay_present else (None, None, None, None)
+        hud = _normalize_region_values(
+            evaluation.hud_x,
+            evaluation.hud_y,
+            evaluation.hud_width,
+            evaluation.hud_height,
+            minimum_size=0.02,
+        ) if evaluation.hud_present else (None, None, None, None)
         return EvaluationResult(
             score=evaluation.score,
             reason=reason[:420],
@@ -286,6 +336,14 @@ class GeminiClient:
             facecam_y=facecam[1],
             facecam_width=facecam[2],
             facecam_height=facecam[3],
+            gameplay_x=gameplay[0],
+            gameplay_y=gameplay[1],
+            gameplay_width=gameplay[2],
+            gameplay_height=gameplay[3],
+            hud_x=hud[0],
+            hud_y=hud[1],
+            hud_width=hud[2],
+            hud_height=hud[3],
         )
 
     def analyze_framing(
@@ -396,6 +454,20 @@ class GeminiClient:
             evaluation.facecam_width,
             evaluation.facecam_height,
         )
+        gameplay = _normalize_region_values(
+            evaluation.gameplay_x,
+            evaluation.gameplay_y,
+            evaluation.gameplay_width,
+            evaluation.gameplay_height,
+            minimum_size=0.04,
+        ) if evaluation.gameplay_present else (None, None, None, None)
+        hud = _normalize_region_values(
+            evaluation.hud_x,
+            evaluation.hud_y,
+            evaluation.hud_width,
+            evaluation.hud_height,
+            minimum_size=0.02,
+        ) if evaluation.hud_present else (None, None, None, None)
         if mode == "gaming_split" and (not evaluation.facecam_present or facecam[0] is None):
             if requested_mode == "auto":
                 mode = "focus"
@@ -412,6 +484,8 @@ class GeminiClient:
                 )
         elif mode != "gaming_split":
             facecam = (None, None, None, None)
+            gameplay = (None, None, None, None)
+            hud = (None, None, None, None)
         return FramingResult(
             reason=evaluation.reason.strip()[:280],
             reframe_mode=mode,
@@ -425,6 +499,14 @@ class GeminiClient:
             output_tokens=output_tokens,
             estimated_cost_eur=estimate_cost_eur(model, input_tokens, output_tokens),
             request_count=request_count,
+            gameplay_x=gameplay[0],
+            gameplay_y=gameplay[1],
+            gameplay_width=gameplay[2],
+            gameplay_height=gameplay[3],
+            hud_x=hud[0],
+            hud_y=hud[1],
+            hud_width=hud[2],
+            hud_height=hud[3],
         )
 
     @staticmethod
@@ -477,8 +559,9 @@ class GeminiClient:
                 "or geometric center was correct."
             ),
             "gaming_split": (
-                "Facecam + gameplay: precisely locate the visible facecam overlay and separately place "
-                "focus_x/focus_y on the gameplay action that carries the clip's context."
+                "Facecam + gameplay: precisely locate the complete facecam overlay, the gameplay region, "
+                "and any compact nearby HUD or stats region whose information helps viewers understand "
+                "the moment. Keep the facecam tight but never cut off the face."
             ),
             "contain": "Keep full context: preserve the complete wide frame inside the vertical result.",
             "center": "Simple center crop: retain a geometric center crop.",
@@ -502,8 +585,10 @@ Target behavior: {target}
 Treat the selected target as a hard constraint unless it is Automatic fallback. For Important subject, inspect
 the actual scene again and correct the old focus when the current render centers the wrong thing. For Facecam +
 gameplay, facecam_present may be true only when you can locate a real facecam overlay; its rectangle must tightly
-cover that overlay, while focus_x/focus_y must point to the important gameplay region. Consider the whole segment
-and choose stable coordinates that preserve the action and context rather than one incidental frame.
+cover that overlay without clipping it. gameplay_present describes the stable gameplay region; focus_x/focus_y
+still mark the important action inside it. hud_present is only for compact, viewer-relevant stats or status
+information that should remain visible beside the facecam. Do not label decorative UI as HUD. Consider the whole
+segment and choose stable coordinates rather than one incidental frame.
 
 Coordinates use a 0-1000 grid over the ORIGINAL full source frame.
 Previous mode: {candidate.reframe_mode}
@@ -598,8 +683,11 @@ Choose how a vertical 9:16 render should frame the attached horizontal video. Co
 0-1000 grid over the full source frame. focus_x/focus_y mark the most important visual point for
 the entire clip, considering the reaction, speaker, gameplay action, and context rather than blindly
 choosing the geometric center. Use gaming_split only when both a small facecam and separate gameplay
-area are important. For gaming_split, return the facecam rectangle and use focus_x/focus_y for the
-important gameplay area. Use contain when cropping would destroy essential wide context.
+area are important. For gaming_split, return tight rectangles for the complete facecam and gameplay area.
+If compact stats or HUD beside the facecam materially help the viewer, also return that HUD rectangle.
+The renderer uses fixed output proportions, so locate source regions accurately instead of choosing output sizes.
+Use focus_x/focus_y for the action inside the important gameplay area. Use contain when cropping would destroy
+essential context.
 
 Local transcript (may contain errors): {excerpt or '[not available]'}
 Local signal score: {candidate.local_score:.1f}/100
@@ -690,8 +778,19 @@ def _normalize_facecam_values(
     raw_width: int,
     raw_height: int,
 ) -> tuple[float | None, float | None, float | None, float | None]:
+    return _normalize_region_values(raw_x, raw_y, raw_width, raw_height, minimum_size=0.06)
+
+
+def _normalize_region_values(
+    raw_x: int,
+    raw_y: int,
+    raw_width: int,
+    raw_height: int,
+    *,
+    minimum_size: float,
+) -> tuple[float | None, float | None, float | None, float | None]:
     values = (raw_x / 1000, raw_y / 1000, raw_width / 1000, raw_height / 1000)
     x, y, width, height = values
-    if width < 0.06 or height < 0.06 or x + width > 1.01 or y + height > 1.01:
+    if width < minimum_size or height < minimum_size or x + width > 1.01 or y + height > 1.01:
         return None, None, None, None
     return x, y, width, height

@@ -4,12 +4,17 @@ import threading
 import time
 from pathlib import Path
 
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
 
 from clipradar.app.coordinator import BackgroundCoordinator
 from clipradar.models import Channel, ClipCandidate, JobStatus, RenderedClip, SourceVideo, utc_now
 from clipradar.ui.main_window import MainWindow
 from clipradar.ui.pages.channels import ChannelCard
+from clipradar.ui.pages.video_dashboard import VideoCard
+from clipradar.ui.timeline import ClickableSlider, TrimRangeSlider
+from clipradar.youtube.client import RemoteVideo
 
 
 def test_main_window_opens_and_navigates(qtbot, services):
@@ -18,12 +23,14 @@ def test_main_window_opens_and_navigates(qtbot, services):
     window.show()
     assert window.page_title.text() == "Dashboard"
     window.nav_buttons[1].click()
-    assert window.page_title.text() == "Channels"
+    assert window.page_title.text() == "Monitoring"
     window.nav_buttons[2].click()
-    assert window.page_title.text() == "Review"
+    assert window.page_title.text() == "Channels"
     window.nav_buttons[3].click()
-    assert window.page_title.text() == "Publishing"
+    assert window.page_title.text() == "Review"
     window.nav_buttons[4].click()
+    assert window.page_title.text() == "Publishing"
+    window.nav_buttons[5].click()
     assert window.page_title.text() == "Settings"
     assert window.settings.model.currentData()
     window.settings.nav.setCurrentRow(5)
@@ -52,6 +59,70 @@ def test_specific_video_dialog_emits_selected_genre(qtbot, monkeypatch):
     assert emitted == [(17, "https://youtube.com/watch?v=genre-test", "20")]
 
 
+def test_existing_seek_slider_is_clickable(qtbot):
+    slider = ClickableSlider(Qt.Orientation.Horizontal)
+    slider.setRange(0, 1000)
+    slider.resize(400, 30)
+    qtbot.addWidget(slider)
+    slider.show()
+
+    QTest.mouseClick(slider, Qt.MouseButton.LeftButton, pos=QPoint(300, 15))
+
+    assert 700 <= slider.value() <= 800
+
+
+def test_trim_range_has_two_independent_handles(qtbot):
+    timeline = TrimRangeSlider()
+    timeline.resize(500, 34)
+    timeline.set_range(0, 100_000)
+    timeline.set_selection(30_000, 70_000)
+    qtbot.addWidget(timeline)
+    timeline.show()
+    changed = []
+    timeline.range_changed.connect(lambda start, end: changed.append((start, end)))
+
+    QTest.mouseClick(
+        timeline,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(round(timeline._x_for_value(20_000)), 17),
+    )
+
+    start, end = timeline.selection()
+    assert 18_000 <= start <= 22_000
+    assert end == 70_000
+    assert changed[-1] == (start, end)
+
+
+def test_dashboard_renders_metadata_cards_and_analyze_uses_genre_dialog(qtbot, services, monkeypatch):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_FEED", "Feed Channel", "", "https://youtube.test/feed"
+    ))
+    window = MainWindow(services, start_background=False)
+    qtbot.addWidget(window)
+    video = RemoteVideo(
+        "feed-video",
+        "A recent channel upload",
+        "https://youtube.com/watch?v=feed-video",
+        channel.channel_id,
+        published_at="2026-09-06T12:00:00+00:00",
+    )
+    window.dashboard.set_videos(int(channel.id), [video])
+    cards = window.dashboard.findChildren(VideoCard)
+    assert len(cards) == 1
+    assert cards[0].title.text() == video.title
+    emitted = []
+    window.dashboard.analyze_requested.connect(lambda *values: emitted.append(values))
+
+    def accept(dialog):
+        genre = dialog.findChild(QComboBox)
+        genre.setCurrentIndex(genre.findData("23"))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", accept)
+    cards[0].analyze_requested.emit(video.url, video.title)
+    assert emitted == [(int(channel.id), video.url, "23")]
+
+
 def test_dashboard_activity_log_is_selectable_and_copyable(qtbot, services):
     channel = services.repositories.channels.add(Channel(
         None, "UC_UI_LOG", "Log channel", "", "https://youtube.test/ui-log"
@@ -64,13 +135,13 @@ def test_dashboard_activity_log_is_selectable_and_copyable(qtbot, services):
     window = MainWindow(services, start_background=False)
     qtbot.addWidget(window)
     window.show()
-    window.dashboard.refresh()
+    window.monitoring.refresh()
 
-    assert window.dashboard.activity_log.isReadOnly()
-    assert "Detailed copyable activity event" in window.dashboard.activity_log.toPlainText()
-    assert "ANALYSIS · UI log source" in window.dashboard.activity_log.toPlainText()
-    assert "WARNING" in window.dashboard.activity_log.toPlainText()
-    window.dashboard.copy_logs.click()
+    assert window.monitoring.activity_log.isReadOnly()
+    assert "Detailed copyable activity event" in window.monitoring.activity_log.toPlainText()
+    assert "ANALYSIS · UI log source" in window.monitoring.activity_log.toPlainText()
+    assert "WARNING" in window.monitoring.activity_log.toPlainText()
+    window.monitoring.copy_logs.click()
     assert "Detailed copyable activity event" in QApplication.clipboard().text()
 
 
@@ -149,6 +220,54 @@ def test_review_queue_filters_by_one_persisted_channel(qtbot, services, tmp_path
     window.review.channel_filter.setCurrentIndex(beta_index)
     assert {record["channel_id"] for record in window.review.records} == {int(channels[1].id)}
     assert services.settings.ui_state().review_channel_id == int(channels[1].id)
+
+
+def test_review_trim_updates_candidate_without_rendering(qtbot, services, tmp_path: Path):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_UI_TRIM", "UI Trim", "", "https://youtube.test/ui-trim"
+    ))
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "ui-trim-video",
+        "UI Trim Source",
+        "https://youtube.test/watch?v=ui-trim",
+        duration_seconds=60,
+    ))
+    candidate = services.repositories.candidates.replace_for_video(int(source.id), [
+        ClipCandidate(
+            None,
+            int(source.id),
+            5,
+            25,
+            88,
+            {},
+            refined_start_seconds=5,
+            refined_end_seconds=25,
+            ai_score=90,
+        )
+    ])[0]
+    clip_path = tmp_path / "trim-buffer.mp4"
+    clip_path.write_bytes(b"review-buffer")
+    services.repositories.clips.add(RenderedClip(
+        None,
+        int(candidate.id),
+        int(source.id),
+        str(clip_path),
+        55,
+        "Vertical 9:16",
+        buffer_start_seconds=0,
+        buffer_end_seconds=55,
+    ))
+    window = MainWindow(services, start_background=False)
+    qtbot.addWidget(window)
+
+    assert window.review.trim.isEnabled()
+    window.review._trim_changed(7_000, 28_000)
+    updated = services.repositories.candidates.get(int(candidate.id))
+    assert updated.render_start == 7
+    assert updated.render_end == 28
+    assert clip_path.read_bytes() == b"review-buffer"
 
 
 def test_background_coordinator_never_runs_two_analysis_jobs_at_once(qtbot, services):

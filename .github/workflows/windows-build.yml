@@ -75,11 +75,11 @@ jobs:
           $process = Start-Process -FilePath (Join-Path $extractRoot "ClipRadar.exe") -ArgumentList "--self-test" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "EXE extracted by Windows failed self-test with code $($process.ExitCode)" }
 
-      - name: Upload directly extractable Windows artifact
+      - name: Upload verified Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: ClipRadar-Windows-x64-v0.3.2
-          path: dist/ClipRadar/
+          name: ClipRadar-Windows-x64-v0.4.0
+          path: ClipRadar-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30
 

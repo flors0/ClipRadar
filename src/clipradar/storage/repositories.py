@@ -65,6 +65,27 @@ def _publish_job(row: Any) -> PublishJob:
     return PublishJob(**data)
 
 
+def _validate_optional_region(
+    label: str,
+    region: tuple[float | None, float | None, float | None, float | None],
+    *,
+    minimum_size: float,
+) -> None:
+    if not any(value is not None for value in region):
+        return
+    if any(value is None for value in region):
+        raise ValueError(f"The {label} rectangle is incomplete.")
+    x, y, width, height = (float(value) for value in region)
+    if (
+        width < minimum_size
+        or height < minimum_size
+        or min(x, y) < 0
+        or x + width > 1.01
+        or y + height > 1.01
+    ):
+        raise ValueError(f"The {label} rectangle is outside the source frame.")
+
+
 class ChannelRepository:
     def __init__(self, database: Database):
         self.db = database
@@ -308,8 +329,10 @@ class CandidateRepository:
                        (source_video_id, start_seconds, end_seconds, local_score, signals_json, ai_score,
                         ai_reason, refined_start_seconds, refined_end_seconds, status, ai_title,
                         ai_description, ai_tags_json, reframe_mode, focus_x, focus_y, facecam_x,
-                        facecam_y, facecam_width, facecam_height)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        facecam_y, facecam_width, facecam_height, gameplay_x, gameplay_y,
+                        gameplay_width, gameplay_height, hud_x, hud_y, hud_width, hud_height)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                               ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         source_video_id, candidate.start_seconds, candidate.end_seconds, candidate.local_score,
                         json.dumps(candidate.signals, separators=(",", ":")), candidate.ai_score,
@@ -317,7 +340,9 @@ class CandidateRepository:
                         candidate.status, candidate.ai_title, candidate.ai_description,
                         json.dumps(candidate.ai_tags, separators=(",", ":")), candidate.reframe_mode,
                         candidate.focus_x, candidate.focus_y, candidate.facecam_x, candidate.facecam_y,
-                        candidate.facecam_width, candidate.facecam_height,
+                        candidate.facecam_width, candidate.facecam_height, candidate.gameplay_x,
+                        candidate.gameplay_y, candidate.gameplay_width, candidate.gameplay_height,
+                        candidate.hud_x, candidate.hud_y, candidate.hud_width, candidate.hud_height,
                     ),
                 )
                 candidate.id = cursor.lastrowid
@@ -354,17 +379,29 @@ class CandidateRepository:
         facecam_y: float | None = None,
         facecam_width: float | None = None,
         facecam_height: float | None = None,
+        gameplay_x: float | None = None,
+        gameplay_y: float | None = None,
+        gameplay_width: float | None = None,
+        gameplay_height: float | None = None,
+        hud_x: float | None = None,
+        hud_y: float | None = None,
+        hud_width: float | None = None,
+        hud_height: float | None = None,
     ) -> None:
         with self.db.connection() as connection:
             connection.execute(
                 """UPDATE clip_candidates SET ai_score = ?, ai_reason = ?, refined_start_seconds = ?,
                    refined_end_seconds = ?, ai_title = ?, ai_description = ?, ai_tags_json = ?,
                    reframe_mode = ?, focus_x = ?, focus_y = ?, facecam_x = ?, facecam_y = ?,
-                   facecam_width = ?, facecam_height = ?, status = 'Ranked' WHERE id = ?""",
+                   facecam_width = ?, facecam_height = ?, gameplay_x = ?, gameplay_y = ?,
+                   gameplay_width = ?, gameplay_height = ?, hud_x = ?, hud_y = ?, hud_width = ?,
+                   hud_height = ?, status = 'Ranked' WHERE id = ?""",
                 (
                     score, reason, refined_start, refined_end, title, description,
                     json.dumps(tags or [], separators=(",", ":")), reframe_mode, focus_x, focus_y,
-                    facecam_x, facecam_y, facecam_width, facecam_height, candidate_id,
+                    facecam_x, facecam_y, facecam_width, facecam_height,
+                    gameplay_x, gameplay_y, gameplay_width, gameplay_height,
+                    hud_x, hud_y, hud_width, hud_height, candidate_id,
                 ),
             )
 
@@ -392,28 +429,53 @@ class CandidateRepository:
         facecam_y: float | None,
         facecam_width: float | None,
         facecam_height: float | None,
+        gameplay_x: float | None = None,
+        gameplay_y: float | None = None,
+        gameplay_width: float | None = None,
+        gameplay_height: float | None = None,
+        hud_x: float | None = None,
+        hud_y: float | None = None,
+        hud_width: float | None = None,
+        hud_height: float | None = None,
     ) -> None:
         if reframe_mode not in {"auto", "focus", "gaming_split", "center", "contain"}:
             raise ValueError("Select a valid reframe mode.")
         values = (focus_x, focus_y)
         if any(value < 0 or value > 1 for value in values):
             raise ValueError("Framing focus coordinates must be between zero and one.")
-        facecam = (facecam_x, facecam_y, facecam_width, facecam_height)
-        if any(value is not None for value in facecam):
-            if any(value is None for value in facecam):
-                raise ValueError("The facecam rectangle is incomplete.")
-            x, y, width, height = (float(value) for value in facecam)
-            if width < 0.06 or height < 0.06 or min(x, y) < 0 or x + width > 1.01 or y + height > 1.01:
-                raise ValueError("The facecam rectangle is outside the source frame.")
+        _validate_optional_region(
+            "facecam", (facecam_x, facecam_y, facecam_width, facecam_height), minimum_size=0.06
+        )
+        _validate_optional_region(
+            "gameplay", (gameplay_x, gameplay_y, gameplay_width, gameplay_height), minimum_size=0.04
+        )
+        _validate_optional_region("HUD", (hud_x, hud_y, hud_width, hud_height), minimum_size=0.02)
         with self.db.connection() as connection:
             connection.execute(
                 """UPDATE clip_candidates SET reframe_mode = ?, focus_x = ?, focus_y = ?,
-                   facecam_x = ?, facecam_y = ?, facecam_width = ?, facecam_height = ? WHERE id = ?""",
+                   facecam_x = ?, facecam_y = ?, facecam_width = ?, facecam_height = ?,
+                   gameplay_x = ?, gameplay_y = ?, gameplay_width = ?, gameplay_height = ?,
+                   hud_x = ?, hud_y = ?, hud_width = ?, hud_height = ? WHERE id = ?""",
                 (
                     reframe_mode, focus_x, focus_y, facecam_x, facecam_y,
-                    facecam_width, facecam_height, candidate_id,
+                    facecam_width, facecam_height, gameplay_x, gameplay_y,
+                    gameplay_width, gameplay_height, hud_x, hud_y, hud_width, hud_height,
+                    candidate_id,
                 ),
             )
+
+    def update_boundaries(self, candidate_id: int, start_seconds: float, end_seconds: float) -> None:
+        if start_seconds < 0 or end_seconds - start_seconds < 1.0:
+            raise ValueError("A clip must be at least one second long.")
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """UPDATE clip_candidates
+                   SET refined_start_seconds = ?, refined_end_seconds = ?
+                   WHERE id = ?""",
+                (round(start_seconds, 3), round(end_seconds, 3), candidate_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("The clip candidate no longer exists.")
 
 
 class ClipRepository:
@@ -443,6 +505,24 @@ class ClipRepository:
                 (status.value, utc_now(), clip_id),
             )
 
+    def replace_media(self, clip_id: int, rendered: RenderedClip) -> None:
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """UPDATE rendered_clips SET file_path = ?, duration_seconds = ?, format = ?,
+                   buffer_start_seconds = ?, buffer_end_seconds = ?, updated_at = ? WHERE id = ?""",
+                (
+                    rendered.file_path,
+                    rendered.duration_seconds,
+                    rendered.format,
+                    rendered.buffer_start_seconds,
+                    rendered.buffer_end_seconds,
+                    utc_now(),
+                    clip_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("The rendered clip no longer exists.")
+
     def delete(self, clip_id: int) -> bool:
         with self.db.connection() as connection:
             row = connection.execute(
@@ -466,8 +546,11 @@ class ClipRepository:
                 f"""SELECT r.*, x.start_seconds, x.end_seconds, x.refined_start_seconds,
                     x.refined_end_seconds, x.ai_score, x.ai_reason, x.ai_title, x.ai_description,
                     x.ai_tags_json, x.reframe_mode, x.focus_x, x.focus_y, x.facecam_x,
-                    x.facecam_y, x.facecam_width, x.facecam_height, v.title AS video_title,
-                    v.url AS source_url, c.id AS channel_id, c.name AS channel_name
+                    x.facecam_y, x.facecam_width, x.facecam_height, x.gameplay_x,
+                    x.gameplay_y, x.gameplay_width, x.gameplay_height, x.hud_x, x.hud_y,
+                    x.hud_width, x.hud_height, v.title AS video_title, v.url AS source_url,
+                    v.local_path AS source_local_path, v.duration_seconds AS source_duration_seconds,
+                    c.id AS channel_id, c.name AS channel_name
                     FROM rendered_clips r
                     JOIN clip_candidates x ON x.id = r.candidate_id
                     JOIN source_videos v ON v.id = r.source_video_id

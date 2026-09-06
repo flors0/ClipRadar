@@ -32,6 +32,26 @@ QFrame#ChannelCard, QFrame#ReviewCard {
     border: 1px solid #242b27;
     border-radius: 12px;
 }
+QFrame#VideoCard {
+    background: #0d1110;
+    border: 1px solid #242b27;
+    border-radius: 12px;
+}
+QFrame#VideoCard:hover { border-color: #56633b; background: #101512; }
+QLabel#VideoThumbnail {
+    background: #080a09;
+    border: none;
+    border-bottom: 1px solid #202722;
+    border-top-left-radius: 11px;
+    border-top-right-radius: 11px;
+    color: #7f8b84;
+}
+QLabel#VideoCardTitle {
+    border: none;
+    padding: 0 13px;
+    font-weight: 650;
+}
+QFrame#VideoCard QLabel#Muted { border: none; padding: 0 13px; }
 QPushButton {
     min-height: 38px;
     padding: 0 16px;
