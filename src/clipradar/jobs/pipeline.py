@@ -12,6 +12,7 @@ from clipradar.app.paths import AppPaths
 from clipradar.media.ffmpeg import create_candidate_preview, create_framing_preview, probe_media
 from clipradar.models import AnalysisJob, ClipCandidate, JobStatus, SourceVideo
 from clipradar.rendering.renderer import ClipRenderer
+from clipradar.settings.models import YOUTUBE_CATEGORY_NAMES
 from clipradar.settings.service import SettingsService
 from clipradar.storage.repositories import Repositories
 from clipradar.youtube.client import YouTubeClient
@@ -138,6 +139,7 @@ class AnalysisPipeline:
                             temperature=ai_settings.temperature,
                             description_style=publishing_settings.description_style,
                             metadata_language=publishing_settings.metadata_language,
+                            content_category=YOUTUBE_CATEGORY_NAMES.get(source.category_id or ""),
                             event_callback=lambda message, level: self.repos.activity.add(
                                 f"Candidate {index + 1}/{len(candidates)} · {message}", level, job.id
                             ),

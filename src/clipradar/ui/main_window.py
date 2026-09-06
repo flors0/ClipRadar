@@ -93,7 +93,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.3.1")
+        version = QLabel("v0.3.2")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
 
         self.pages = QStackedWidget()
         self.dashboard = DashboardPage(self.services.repositories)
-        self.channels = ChannelsPage(self.services.repositories.channels)
+        self.channels = ChannelsPage(self.services.repositories.channels, self.services.settings)
         self.review = ReviewPage(
             self.services.repositories.clips,
             self.services.repositories.channels,
@@ -162,8 +162,9 @@ class MainWindow(QMainWindow):
             )
         )
         self.channels.specific_requested.connect(
-            lambda channel_id, url: self._background(
-                f"specific:{channel_id}", lambda: self.services.channels.analyze_specific(channel_id, url)
+            lambda channel_id, url, category_id: self._background(
+                f"specific:{channel_id}",
+                lambda: self.services.channels.analyze_specific(channel_id, url, category_id),
             )
         )
         self.channels.remove_requested.connect(

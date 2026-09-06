@@ -7,6 +7,7 @@ from typing import Callable
 
 from clipradar.models import ClipStatus, PublishJob, PublishStatus, YouTubeAccount, utc_now
 from clipradar.publishing.youtube import YouTubePublishingClient, YouTubePublishingError
+from clipradar.settings.models import YOUTUBE_CATEGORY_NAMES
 from clipradar.settings.service import SettingsService
 from clipradar.storage.repositories import Repositories
 
@@ -107,6 +108,12 @@ class PublishingService:
         if privacy not in {"private", "unlisted", "public"}:
             raise ValueError("Select Private, Unlisted, or Public visibility.")
         normalized_schedule = _validate_schedule(scheduled_for)
+        source = self.repos.videos.get(clip.source_video_id)
+        category_id = (
+            source.category_id
+            if source and source.category_id in YOUTUBE_CATEGORY_NAMES
+            else config.category_id
+        )
         job = PublishJob(
             id=str(uuid.uuid4()),
             rendered_clip_id=clip_id,
@@ -114,7 +121,7 @@ class PublishingService:
             title=clean_title,
             description=clean_description,
             tags=clean_tags,
-            category_id=config.category_id,
+            category_id=category_id,
             privacy_status=privacy,
             made_for_kids=config.made_for_kids,
             notify_subscribers=config.notify_subscribers,

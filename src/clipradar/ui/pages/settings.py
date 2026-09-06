@@ -34,6 +34,7 @@ from clipradar.settings.models import (
     MonitoringSettings,
     PublishingSettings,
     StorageSettings,
+    YOUTUBE_VIDEO_CATEGORIES,
 )
 from clipradar.settings.service import SettingsService
 from clipradar.ui.common import card_layout, muted_label, title_label
@@ -260,10 +261,8 @@ class SettingsPage(QWidget):
         self.default_privacy = QComboBox()
         self.default_privacy.addItems(["Private", "Unlisted", "Public"])
         self.category = QComboBox()
-        self.category.addItem("Gaming", "20")
-        self.category.addItem("Entertainment", "24")
-        self.category.addItem("People & Blogs", "22")
-        self.category.addItem("Comedy", "23")
+        for name, category_id in YOUTUBE_VIDEO_CATEGORIES:
+            self.category.addItem(name, category_id)
         self.made_for_kids = QCheckBox("This channel's uploads are made for children")
         self.notify_subscribers = QCheckBox("Notify subscribers for new uploads")
         self.upload_limit = QSpinBox()

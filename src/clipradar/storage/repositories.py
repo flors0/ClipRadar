@@ -129,9 +129,19 @@ class VideoRepository:
             if existing:
                 connection.execute(
                     """UPDATE source_videos SET title = ?, url = ?, published_at = COALESCE(?, published_at),
-                       duration_seconds = COALESCE(?, duration_seconds), thumbnail_url = COALESCE(NULLIF(?, ''), thumbnail_url)
+                       duration_seconds = COALESCE(?, duration_seconds),
+                       thumbnail_url = COALESCE(NULLIF(?, ''), thumbnail_url),
+                       category_id = COALESCE(?, category_id)
                        WHERE id = ?""",
-                    (video.title, video.url, video.published_at, video.duration_seconds, video.thumbnail_url, existing["id"]),
+                    (
+                        video.title,
+                        video.url,
+                        video.published_at,
+                        video.duration_seconds,
+                        video.thumbnail_url,
+                        video.category_id,
+                        existing["id"],
+                    ),
                 )
                 row = connection.execute("SELECT * FROM source_videos WHERE id = ?", (existing["id"],)).fetchone()
                 return _video(row), False

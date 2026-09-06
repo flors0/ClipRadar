@@ -152,6 +152,7 @@ class GeminiClient:
         temperature: float,
         description_style: str = "Auto",
         metadata_language: str = "Auto",
+        content_category: str | None = None,
         event_callback: GeminiEventCallback | None = None,
     ) -> EvaluationResult:
         preview_path = Path(preview_path)
@@ -166,6 +167,7 @@ class GeminiClient:
             maximum_duration,
             description_style,
             metadata_language,
+            content_category,
         )
         event_callback = event_callback or (lambda _message, _level: None)
         request_count = 0
@@ -559,6 +561,7 @@ Previous facecam: {old_facecam}
         maximum_duration: float,
         description_style: str,
         metadata_language: str,
+        content_category: str | None = None,
     ) -> str:
         excerpt = str(candidate.signals.get("transcript_excerpt", ""))
         style = {
@@ -569,10 +572,16 @@ Previous facecam: {old_facecam}
             ),
         }.get(description_style, "Choose a concise or detailed description based on what genuinely fits the clip.")
         language = "Use the spoken language of the clip." if metadata_language == "Auto" else f"Write metadata in {metadata_language}."
+        genre = (
+            f"The user explicitly classified this source video as {content_category}. Use that genre as context."
+            if content_category
+            else "Infer the content genre from the video itself."
+        )
         return f"""You are selecting one excellent short-form social video moment.
 Watch the entire attached candidate. Score it for humor, surprise, emotion, a strong reaction,
 a clear payoff, understandable context, and suitability for YouTube Shorts/TikTok.
 Quality matters more than quantity. A mediocre but usable moment should score below 60.
+{genre}
 
 Return offsets relative to the beginning of this attached candidate, not source-video timestamps.
 Choose natural sentence/reaction boundaries. Keep the final duration between {minimum_duration:.0f}

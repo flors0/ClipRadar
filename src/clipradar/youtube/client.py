@@ -194,11 +194,28 @@ class YouTubeClient:
             "writeinfojson": True,
             "ffmpeg_location": str(Path(bundled_binary("ffmpeg")).parent),
         }
+        download_url = f"https://www.youtube.com/watch?v={video.video_id}"
         try:
             with self._ydl(options) as ydl:
-                info = ydl.extract_info(video.url, download=True)
+                info = ydl.extract_info(download_url, download=True)
         except Exception as exc:
-            raise YouTubeError(f"The source video could not be downloaded: {exc}") from exc
+            if "403" not in str(exc):
+                raise YouTubeError(f"The source video could not be downloaded: {exc}") from exc
+            for partial in (*target_dir.glob("*.part"), *target_dir.glob("*.ytdl")):
+                partial.unlink(missing_ok=True)
+            direct_options = options | {
+                "format": (
+                    "bv*[height<=1080][protocol^=http]+ba[protocol^=http]/"
+                    "b[height<=1080][protocol^=http]/best[height<=1080]"
+                ),
+            }
+            try:
+                with self._ydl(direct_options) as ydl:
+                    info = ydl.extract_info(download_url, download=True)
+            except Exception as retry_exc:
+                raise YouTubeError(
+                    f"The source video could not be downloaded after a direct-stream retry: {retry_exc}"
+                ) from retry_exc
 
         video_files = [path for path in target_dir.glob(f"{video.video_id}.*") if path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}]
         if not video_files:
@@ -237,7 +254,9 @@ class YouTubeClient:
         }
         try:
             with self._ydl(options) as ydl:
-                ydl.extract_info(video.url, download=True)
+                ydl.extract_info(
+                    f"https://www.youtube.com/watch?v={video.video_id}", download=True
+                )
         except Exception:
             # Captions improve local candidate selection, but a rate-limited or
             # unavailable subtitle track must never discard a valid source video.

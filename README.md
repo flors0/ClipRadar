@@ -13,7 +13,7 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Establish a safe baseline when a channel is first added so old uploads are not analyzed without limit.
 - Check a bounded recent-upload window and apply a per-channel analysis delay.
 - Manually analyze the latest upload or a specific video.
-- Download source media first, then fetch at most one available English VTT caption track as an optional best-effort enhancement.
+- Download source media first, retry a rejected HLS stream once through a direct format, then fetch at most one available English VTT caption track as an optional best-effort enhancement.
 - Preselect candidate ranges locally using audio energy, transcript reactions, scene changes, and YouTube heatmap data when available.
 - Send only compressed candidate previews to the selected Gemini model.
 - Validate Gemini finish reasons and retry one incomplete structured response with a larger output budget across every selectable model.
@@ -22,7 +22,7 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Ask Gemini for the important scene focus and choose a subject crop, context-preserving frame, or facecam-plus-gameplay layout.
 - Regenerate framing by having Gemini compare the exact original segment with the current vertical render, for Important subject, Facecam + gameplay, and every selectable framing mode.
 - Render 9:16 H.264 MP4 with scene-aware reframing and loudness normalization. Burned captions are disabled by default.
-- Generate a relevant YouTube title, description, and tags for every newly analyzed candidate.
+- Generate a relevant YouTube title, description, and tags for every newly analyzed candidate, with an optional per-video genre hint for manual analyses.
 - Preview, approve, reject, regenerate, open, or trace a clip back to its source in the review queue.
 - Keep each review queue separated by a persistent per-channel selector.
 - Permanently remove a review item and its local file from the right-click menu, including recovery from files deleted outside ClipRadar.

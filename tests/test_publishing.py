@@ -56,12 +56,17 @@ class FakeYouTubePublishingClient:
         )
 
 
-def _ready_clip(services, tmp_path: Path) -> int:
+def _ready_clip(services, tmp_path: Path, *, category_id: str | None = None) -> int:
     channel = services.repositories.channels.add(Channel(
         None, "UC_SOURCE", "Source", "", "https://youtube.test/source"
     ))
     source, _ = services.repositories.videos.upsert(SourceVideo(
-        None, int(channel.id), "source-video", "Source video", "https://youtube.test/watch?v=source"
+        None,
+        int(channel.id),
+        "source-video",
+        "Source video",
+        "https://youtube.test/watch?v=source",
+        category_id=category_id,
     ))
     candidate = services.repositories.candidates.replace_for_video(int(source.id), [
         ClipCandidate(
@@ -153,6 +158,27 @@ def test_cancel_returns_clip_to_review_and_allows_requeue(services, tmp_path: Pa
     assert second.id == first.id
     assert second.title == "Edited title"
     assert second.status == PublishStatus.QUEUED
+
+
+def test_manual_video_genre_overrides_global_upload_category(services, tmp_path: Path):
+    fake = FakeYouTubePublishingClient()
+    publishing = PublishingService(services.repositories, services.settings, fake)  # type: ignore[arg-type]
+    services.settings.save_publishing(PublishingSettings(category_id="20"))
+    services.settings.secrets.set_youtube_client("{}")
+    account = publishing.connect_account()
+    clip_id = _ready_clip(services, tmp_path, category_id="24")
+
+    job = publishing.queue_clip(
+        clip_id=clip_id,
+        account_id=int(account.id),
+        title="Entertainment clip",
+        description="",
+        tags=[],
+        privacy_status="Private",
+        scheduled_for=None,
+    )
+
+    assert job.category_id == "24"
 
 
 def test_youtube_request_body_contains_generated_tags_and_schedule():

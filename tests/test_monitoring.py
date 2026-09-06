@@ -25,6 +25,9 @@ class FakeYouTube:
     def list_recent_videos(self, _url: str, limit: int = 12):
         return self.items[:limit]
 
+    def resolve_video(self, _url: str) -> RemoteVideo:
+        return self.video("specific-video")
+
 
 def test_add_uses_baseline_then_monitoring_queues_only_new_uploads(services):
     youtube = FakeYouTube()
@@ -48,6 +51,20 @@ def test_manual_latest_is_queued_immediately(services):
     assert job is not None
     assert job.manual is True
     assert services.repositories.jobs.next_due() is not None
+
+
+def test_manual_specific_video_stores_selected_genre(services):
+    youtube = FakeYouTube()
+    channels = ChannelService(services.repositories, services.settings, youtube)
+    channel = channels.add_channel("@fake")
+
+    job_id = channels.analyze_specific(
+        int(channel.id), "https://youtube.test/watch?v=specific-video", "24"
+    )
+
+    job = services.repositories.jobs.get(job_id)
+    source = services.repositories.videos.get(job.source_video_id)
+    assert source.category_id == "24"
 
 
 def test_analysis_queue_has_deterministic_sequential_positions(services):

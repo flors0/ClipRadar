@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from clipradar.models import Channel, SourceVideo, utc_now
+from clipradar.settings.models import YOUTUBE_CATEGORY_NAMES
 from clipradar.settings.service import SettingsService
 from clipradar.storage.repositories import Repositories
 from clipradar.youtube.client import RemoteVideo, YouTubeClient, YouTubeError
@@ -70,12 +71,14 @@ class ChannelService:
         source = self._store_remote(channel, videos[0])
         return self._queue(source, manual=True, scheduled_at=utc_now())
 
-    def analyze_specific(self, channel_id: int, video_url: str) -> str:
+    def analyze_specific(self, channel_id: int, video_url: str, category_id: str) -> str:
         channel = self._require_channel(channel_id)
+        if category_id not in YOUTUBE_CATEGORY_NAMES:
+            raise ValueError("Select a valid video genre.")
         remote = self.youtube.resolve_video(video_url)
         if remote.channel_id and remote.channel_id != channel.channel_id:
             raise YouTubeError(f"That video belongs to a different channel, not {channel.name}.")
-        source = self._store_remote(channel, remote)
+        source = self._store_remote(channel, remote, category_id=category_id)
         return self._queue(source, manual=True, scheduled_at=utc_now())
 
     def scan_all(self) -> ScanResult:
@@ -121,7 +124,13 @@ class ChannelService:
             self.repos.activity.add(f"Detected {len(stored)} new upload{'s' if len(stored) != 1 else ''} from {channel.name}")
         return stored
 
-    def _store_remote(self, channel: Channel, remote: RemoteVideo) -> SourceVideo:
+    def _store_remote(
+        self,
+        channel: Channel,
+        remote: RemoteVideo,
+        *,
+        category_id: str | None = None,
+    ) -> SourceVideo:
         source, _ = self.repos.videos.upsert(SourceVideo(
             id=None,
             channel_id=int(channel.id),
@@ -131,6 +140,7 @@ class ChannelService:
             published_at=remote.published_at,
             duration_seconds=remote.duration_seconds,
             thumbnail_url=remote.thumbnail_url,
+            category_id=category_id,
         ))
         return source
 
@@ -139,8 +149,12 @@ class ChannelService:
             raise ValueError("This video already has an active analysis job.")
         job = self.repos.jobs.create(int(source.id), scheduled_at=scheduled_at, manual=manual)
         position = self.repos.jobs.queue_position(job.id)
-        suffix = f" · sequential queue position {position}" if position is not None else ""
-        self.repos.activity.add(f"Queued {source.title}{suffix}", job_id=job.id)
+        position_suffix = f" · sequential queue position {position}" if position is not None else ""
+        category_name = YOUTUBE_CATEGORY_NAMES.get(source.category_id or "")
+        category_suffix = f" · genre {category_name}" if category_name else ""
+        self.repos.activity.add(
+            f"Queued {source.title}{position_suffix}{category_suffix}", job_id=job.id
+        )
         return job.id
 
     def _require_channel(self, channel_id: int) -> Channel:

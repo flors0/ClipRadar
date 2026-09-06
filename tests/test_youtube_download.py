@@ -52,3 +52,45 @@ def test_subtitle_rate_limit_does_not_discard_downloaded_video(tmp_path: Path, m
     assert calls[1]["skip_download"] is True
     assert calls[1]["subtitleslangs"] == ["en"]
     assert YouTubeClient._preferred_caption_languages({"automatic_captions": {"de": []}}) == []
+
+
+def test_http_403_retries_once_with_direct_stream_and_canonical_url(tmp_path: Path, monkeypatch):
+    paths = AppPaths.create(tmp_path)
+    calls: list[tuple[str, dict]] = []
+
+    class FakeYDL:
+        def __init__(self, options: dict):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url: str, download: bool):
+            assert download is True
+            calls.append((url, self.options))
+            if len(calls) == 1:
+                partial = Path(self.options["outtmpl"].replace("%(ext)s", "mp4.part"))
+                partial.write_bytes(b"partial download")
+                raise RuntimeError("unable to download video data: HTTP Error 403: Forbidden")
+            output = Path(self.options["outtmpl"].replace("%(ext)s", "mp4"))
+            output.write_bytes(b"valid source media")
+            return {"id": "replay-video", "duration": 81}
+
+    monkeypatch.setattr(YouTubeClient, "_ydl", staticmethod(FakeYDL))
+    downloaded = YouTubeClient(paths).download(RemoteVideo(
+        video_id="replay-video",
+        title="Finished stream replay",
+        url="https://www.youtube.com/live/replay-video?feature=share",
+        channel_id="UC_TEST",
+    ))
+
+    assert downloaded.video_path.read_bytes() == b"valid source media"
+    assert len(calls) == 2
+    assert {url for url, _options in calls} == {
+        "https://www.youtube.com/watch?v=replay-video"
+    }
+    assert "[protocol^=http]" in calls[1][1]["format"]
+    assert not list((paths.downloads / "replay-video").glob("*.part"))

@@ -78,7 +78,7 @@ jobs:
       - name: Upload directly extractable Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClipRadar-Windows-x64-v0.3.1
+          name: ClipRadar-Windows-x64-v0.3.2
           path: dist/ClipRadar/
           if-no-files-found: error
           retention-days: 30

@@ -4,6 +4,15 @@ from dataclasses import asdict, dataclass
 from typing import Any, TypeVar
 
 
+YOUTUBE_VIDEO_CATEGORIES = (
+    ("Gaming", "20"),
+    ("Entertainment", "24"),
+    ("People & Blogs", "22"),
+    ("Comedy", "23"),
+)
+YOUTUBE_CATEGORY_NAMES = {category_id: name for name, category_id in YOUTUBE_VIDEO_CATEGORIES}
+
+
 @dataclass(slots=True)
 class GeneralSettings:
     start_monitoring_on_launch: bool = True

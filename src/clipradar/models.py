@@ -78,6 +78,7 @@ class SourceVideo:
     thumbnail_url: str = ""
     local_path: str | None = None
     transcript_path: str | None = None
+    category_id: str | None = None
     discovered_at: str = field(default_factory=utc_now)
 
 

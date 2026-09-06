@@ -38,12 +38,13 @@ def test_framing_schema_is_accepted_by_google_sdk():
 
 def test_gemini_prompt_requests_editable_metadata_tags_and_scene_focus():
     candidate = ClipCandidate(None, 1, 10, 45, 88, {"transcript_excerpt": "That was impossible!"})
-    prompt = GeminiClient._prompt(candidate, 20, 60, "Detailed", "English")
+    prompt = GeminiClient._prompt(candidate, 20, 60, "Detailed", "English", "Gaming")
     assert "500-1200 characters" in prompt
     assert "6-15 specific search tags" in prompt
     assert "random foreign-language text" in prompt
     assert "important gameplay area" in prompt
     assert "Write metadata in English" in prompt
+    assert "explicitly classified this source video as Gaming" in prompt
 
 
 class _FakeModels:

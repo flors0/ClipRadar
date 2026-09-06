@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 SCHEMA = """
@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS source_videos (
     thumbnail_url TEXT NOT NULL DEFAULT '',
     local_path TEXT,
     transcript_path TEXT,
+    category_id TEXT,
     discovered_at TEXT NOT NULL
 );
 
@@ -209,6 +210,10 @@ class Database:
                     )
                 except (TypeError, ValueError, json.JSONDecodeError):
                     pass
+        if version < 3:
+            video_columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_videos)")}
+            if "category_id" not in video_columns:
+                connection.execute("ALTER TABLE source_videos ADD COLUMN category_id TEXT")
         connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     @contextmanager

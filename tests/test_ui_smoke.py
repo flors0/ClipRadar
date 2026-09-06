@@ -4,11 +4,12 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
 
 from clipradar.app.coordinator import BackgroundCoordinator
 from clipradar.models import Channel, ClipCandidate, JobStatus, RenderedClip, SourceVideo, utc_now
 from clipradar.ui.main_window import MainWindow
+from clipradar.ui.pages.channels import ChannelCard
 
 
 def test_main_window_opens_and_navigates(qtbot, services):
@@ -28,6 +29,27 @@ def test_main_window_opens_and_navigates(qtbot, services):
     window.settings.nav.setCurrentRow(5)
     assert window.settings.description_style.currentText() in {"Auto", "Short", "Detailed"}
     assert "tags" in window.settings.default_tags.placeholderText().lower()
+
+
+def test_specific_video_dialog_emits_selected_genre(qtbot, monkeypatch):
+    channel = Channel(None, "UC_DIALOG", "Dialog", "", "https://youtube.test/dialog")
+    channel.id = 17
+    card = ChannelCard(channel, "24")
+    qtbot.addWidget(card)
+    emitted = []
+    card.specific_requested.connect(lambda *values: emitted.append(values))
+
+    def accept(dialog):
+        dialog.findChild(QLineEdit).setText("https://youtube.com/watch?v=genre-test")
+        genre = dialog.findChild(QComboBox)
+        assert genre.currentData() == "24"
+        genre.setCurrentIndex(genre.findData("20"))
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, "exec", accept)
+    card._specific()
+
+    assert emitted == [(17, "https://youtube.com/watch?v=genre-test", "20")]
 
 
 def test_dashboard_activity_log_is_selectable_and_copyable(qtbot, services):

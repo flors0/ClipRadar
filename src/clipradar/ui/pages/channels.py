@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
+    QComboBox,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -18,6 +19,8 @@ from PySide6.QtWidgets import (
 )
 
 from clipradar.models import Channel
+from clipradar.settings.models import YOUTUBE_VIDEO_CATEGORIES
+from clipradar.settings.service import SettingsService
 from clipradar.storage.repositories import ChannelRepository
 from clipradar.ui.common import card_layout, clear_layout, format_timestamp, muted_label, status_pill, title_label
 
@@ -70,13 +73,14 @@ class ChannelSettingsDialog(QDialog):
 class ChannelCard(QFrame):
     toggle_requested = Signal(int, bool)
     latest_requested = Signal(int)
-    specific_requested = Signal(int, str)
+    specific_requested = Signal(int, str, str)
     remove_requested = Signal(int)
     update_requested = Signal(int, dict)
 
-    def __init__(self, channel: Channel, parent: QWidget | None = None):
+    def __init__(self, channel: Channel, default_category_id: str, parent: QWidget | None = None):
         super().__init__(parent)
         self.channel = channel
+        self.default_category_id = default_category_id
         self.setObjectName("ChannelCard")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 17, 20, 17)
@@ -129,12 +133,21 @@ class ChannelCard(QFrame):
         field = QLineEdit()
         field.setPlaceholderText("https://www.youtube.com/watch?v=…")
         layout.addWidget(field)
+        layout.addWidget(title_label("Genre"))
+        genre = QComboBox()
+        for name, category_id in YOUTUBE_VIDEO_CATEGORIES:
+            genre.addItem(name, category_id)
+        default_index = genre.findData(self.default_category_id)
+        genre.setCurrentIndex(default_index if default_index >= 0 else 0)
+        layout.addWidget(genre)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
         buttons.rejected.connect(dialog.reject)
         buttons.accepted.connect(dialog.accept)
         layout.addWidget(buttons)
         if dialog.exec() and field.text().strip():
-            self.specific_requested.emit(int(self.channel.id), field.text().strip())
+            self.specific_requested.emit(
+                int(self.channel.id), field.text().strip(), str(genre.currentData())
+            )
 
     def _settings(self) -> None:
         dialog = ChannelSettingsDialog(self.channel, self)
@@ -155,13 +168,19 @@ class ChannelsPage(QWidget):
     add_requested = Signal(str)
     toggle_requested = Signal(int, bool)
     latest_requested = Signal(int)
-    specific_requested = Signal(int, str)
+    specific_requested = Signal(int, str, str)
     remove_requested = Signal(int)
     update_requested = Signal(int, dict)
 
-    def __init__(self, repository: ChannelRepository, parent: QWidget | None = None):
+    def __init__(
+        self,
+        repository: ChannelRepository,
+        settings: SettingsService,
+        parent: QWidget | None = None,
+    ):
         super().__init__(parent)
         self.repository = repository
+        self.settings = settings
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(16)
@@ -215,7 +234,7 @@ class ChannelsPage(QWidget):
             layout.addStretch(1)
             self.cards.addWidget(empty)
         for channel in channels:
-            card = ChannelCard(channel)
+            card = ChannelCard(channel, self.settings.publishing().category_id)
             card.toggle_requested.connect(self.toggle_requested)
             card.latest_requested.connect(self.latest_requested)
             card.specific_requested.connect(self.specific_requested)
