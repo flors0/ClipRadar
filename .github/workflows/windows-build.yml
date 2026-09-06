@@ -61,15 +61,25 @@ jobs:
           $process = Start-Process -FilePath ".\dist\ClipRadar\ClipRadar.exe" -ArgumentList "--self-test" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Packaged EXE self-test failed with code $($process.ExitCode)" }
 
-      - name: Package application
+      - name: Package and verify application
         shell: pwsh
-        run: Compress-Archive -Path .\dist\ClipRadar\* -DestinationPath .\ClipRadar-Windows-x64.zip -CompressionLevel Optimal
+        run: |
+          Compress-Archive -Path .\dist\ClipRadar\* -DestinationPath .\ClipRadar-Windows-x64.zip -CompressionLevel Optimal
+          $extractRoot = Join-Path $env:RUNNER_TEMP "ClipRadar-archive-check"
+          if (Test-Path $extractRoot) { Remove-Item $extractRoot -Recurse -Force }
+          Expand-Archive -Path .\ClipRadar-Windows-x64.zip -DestinationPath $extractRoot -Force
+          foreach ($required in @("ClipRadar.exe", "_internal\bin\ffmpeg.exe", "_internal\bin\ffprobe.exe")) {
+            $requiredPath = Join-Path $extractRoot $required
+            if (-not (Test-Path $requiredPath -PathType Leaf)) { throw "Extracted archive is missing $required" }
+          }
+          $process = Start-Process -FilePath (Join-Path $extractRoot "ClipRadar.exe") -ArgumentList "--self-test" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "EXE extracted by Windows failed self-test with code $($process.ExitCode)" }
 
-      - name: Upload Windows artifact
+      - name: Upload directly extractable Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ClipRadar-Windows-x64
-          path: ClipRadar-Windows-x64.zip
+          name: ClipRadar-Windows-x64-v0.3.1
+          path: dist/ClipRadar/
           if-no-files-found: error
           retention-days: 30
 
