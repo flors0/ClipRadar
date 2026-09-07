@@ -5,7 +5,7 @@ import logging
 import sqlite3
 
 from clipradar.app.logging_setup import RedactingFilter
-from clipradar.models import Channel
+from clipradar.models import Channel, JobStatus
 from clipradar.settings.models import AISettings, BudgetSettings, ClipSettings, UIStateSettings
 from clipradar.storage.database import Database
 
@@ -86,7 +86,7 @@ def test_version_one_database_migrates_metadata_publishing_and_disables_captions
             connection.execute("SELECT value_json FROM settings WHERE key = 'clips'").fetchone()["value_json"]
         )
         tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert version == 4
+    assert version == 5
     assert {"ai_title", "ai_tags_json", "reframe_mode", "focus_x", "facecam_x"} <= columns
     assert {"youtube_accounts", "publish_jobs"} <= tables
     assert settings["captions_enabled"] is False
@@ -110,7 +110,7 @@ def test_version_two_database_adds_source_video_category(tmp_path):
         version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_videos)")}
 
-    assert version == 4
+    assert version == 5
     assert "category_id" in columns
 
 
@@ -170,11 +170,111 @@ def test_version_three_database_adds_review_buffers_and_semantic_regions(tmp_pat
             "SELECT buffer_start_seconds, buffer_end_seconds FROM rendered_clips WHERE id = 1"
         ).fetchone()
 
-    assert version == 4
+    assert version == 5
     assert {"gameplay_x", "gameplay_height", "hud_x", "hud_height"} <= candidate_columns
     assert {"buffer_start_seconds", "buffer_end_seconds"} <= clip_columns
     assert migrated["buffer_start_seconds"] == 12
     assert migrated["buffer_end_seconds"] == 38
+
+
+def test_version_four_database_requires_approval_for_legacy_automatic_jobs(tmp_path):
+    path = tmp_path / "version-four.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (version INTEGER NOT NULL);
+            INSERT INTO schema_info(version) VALUES (4);
+            CREATE TABLE analysis_jobs (
+                id TEXT PRIMARY KEY,
+                source_video_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                scheduled_at TEXT NOT NULL,
+                manual INTEGER NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                progress REAL NOT NULL DEFAULT 0,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE clip_candidates (
+                id INTEGER PRIMARY KEY,
+                source_video_id INTEGER NOT NULL,
+                start_seconds REAL NOT NULL,
+                end_seconds REAL NOT NULL,
+                local_score REAL NOT NULL,
+                signals_json TEXT NOT NULL DEFAULT '{}',
+                ai_score REAL,
+                ai_reason TEXT NOT NULL DEFAULT '',
+                refined_start_seconds REAL,
+                refined_end_seconds REAL,
+                status TEXT NOT NULL DEFAULT 'Detected'
+            );
+            CREATE TABLE rendered_clips (
+                id INTEGER PRIMARY KEY,
+                candidate_id INTEGER NOT NULL,
+                source_video_id INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                duration_seconds REAL NOT NULL,
+                format TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'Ready',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                buffer_start_seconds REAL,
+                buffer_end_seconds REAL
+            );
+            INSERT INTO analysis_jobs VALUES
+                ('automatic', 1, 'Scheduled', 'Queued', '2026-01-01', 0, 0, 0, NULL, '2026-01-01', '2026-01-01'),
+                ('manual', 1, 'Waiting', 'Queued', '2026-01-01', 1, 0, 0, NULL, '2026-01-01', '2026-01-01');
+            INSERT INTO clip_candidates
+                (id, source_video_id, start_seconds, end_seconds, local_score,
+                 refined_start_seconds, refined_end_seconds)
+                VALUES (1, 1, 10, 40, 80, 12, 38);
+            INSERT INTO rendered_clips VALUES
+                (1, 1, 1, 'review.mp4', 86, 'Vertical 9:16', 'Ready',
+                 '2026-01-01', '2026-01-01', 0, 86);
+            """
+        )
+
+    database = Database(path)
+    database.initialize()
+    with database.connection() as connection:
+        jobs = {
+            row["id"]: row
+            for row in connection.execute(
+                "SELECT id, approved, cancel_requested FROM analysis_jobs"
+            )
+        }
+        clip = connection.execute(
+            "SELECT trim_origin_seconds FROM rendered_clips WHERE id = 1"
+        ).fetchone()
+        version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
+
+    assert version == 5
+    assert jobs["automatic"]["approved"] == 0
+    assert jobs["manual"]["approved"] == 1
+    assert jobs["automatic"]["cancel_requested"] == 0
+    assert clip["trim_origin_seconds"] == 12
+
+
+def test_analysis_job_can_be_started_and_cancelled_before_work(services):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_TASK", "Task Channel", "", "https://youtube.test/task"
+    ))
+    from clipradar.models import SourceVideo, utc_now
+
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None, int(channel.id), "task-video", "Task video", "https://youtube.test/task-video"
+    ))
+    job = services.repositories.jobs.create(int(source.id), utc_now(), manual=False)
+    assert not job.approved
+    assert services.repositories.jobs.next_due() is None
+    assert services.repositories.jobs.approve(job.id)
+    assert services.repositories.jobs.next_due().id == job.id
+    assert services.repositories.jobs.request_cancel(job.id)
+    cancelled = services.repositories.jobs.get(job.id)
+    assert cancelled.status == JobStatus.CANCELLED
+    assert cancelled.cancel_requested
 
 
 def test_logging_filter_redacts_google_tokens():

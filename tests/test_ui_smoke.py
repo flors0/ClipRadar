@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from PySide6.QtCore import QPoint, Qt
@@ -12,7 +13,7 @@ from clipradar.app.coordinator import BackgroundCoordinator
 from clipradar.models import Channel, ClipCandidate, JobStatus, RenderedClip, SourceVideo, utc_now
 from clipradar.ui.main_window import MainWindow
 from clipradar.ui.pages.channels import ChannelCard
-from clipradar.ui.pages.video_dashboard import VideoCard
+from clipradar.ui.pages.video_dashboard import VideoCard, _relative_upload_time
 from clipradar.ui.timeline import ClickableSlider, TrimRangeSlider
 from clipradar.youtube.client import RemoteVideo
 
@@ -110,6 +111,8 @@ def test_dashboard_renders_metadata_cards_and_analyze_uses_genre_dialog(qtbot, s
     cards = window.dashboard.findChildren(VideoCard)
     assert len(cards) == 1
     assert cards[0].title.text() == video.title
+    assert cards[0].maximumWidth() == 370
+    assert window.dashboard.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     emitted = []
     window.dashboard.analyze_requested.connect(lambda *values: emitted.append(values))
 
@@ -121,6 +124,14 @@ def test_dashboard_renders_metadata_cards_and_analyze_uses_genre_dialog(qtbot, s
     monkeypatch.setattr(QDialog, "exec", accept)
     cards[0].analyze_requested.emit(video.url, video.title)
     assert emitted == [(int(channel.id), video.url, "23")]
+
+
+def test_dashboard_upload_time_is_relative_for_24_hours_then_uses_date():
+    recent = datetime.now(timezone.utc) - timedelta(hours=4, minutes=5)
+    older = datetime.now(timezone.utc) - timedelta(hours=25)
+
+    assert _relative_upload_time(recent.isoformat()) == "4 hours ago"
+    assert _relative_upload_time(older.isoformat()) == older.astimezone().strftime("%d.%m.%Y")
 
 
 def test_dashboard_activity_log_is_selectable_and_copyable(qtbot, services):
@@ -143,6 +154,32 @@ def test_dashboard_activity_log_is_selectable_and_copyable(qtbot, services):
     assert "WARNING" in window.monitoring.activity_log.toPlainText()
     window.monitoring.copy_logs.click()
     assert "Detailed copyable activity event" in QApplication.clipboard().text()
+
+
+def test_activity_log_keeps_job_events_chronological_and_groups_application_events(qtbot, services):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_LOG_ORDER", "Log order", "", "https://youtube.test/log-order"
+    ))
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "log-order-video",
+        "Chronological log",
+        "https://youtube.test/watch?v=log-order",
+    ))
+    job = services.repositories.jobs.create(int(source.id), utc_now(), manual=True)
+    services.repositories.activity.add("Video selected · Chronological log · 3:20", job_id=job.id)
+    services.repositories.activity.add("Queued Chronological log", job_id=job.id)
+    services.repositories.activity.add("Application event one")
+    services.repositories.activity.add("Application event two")
+
+    window = MainWindow(services, start_background=False)
+    qtbot.addWidget(window)
+    text = window.monitoring.activity_log.toPlainText()
+
+    assert text.index("Video selected") < text.index("Queued Chronological log")
+    assert text.splitlines().count("APPLICATION") == 1
+    assert "Not started" in text
 
 
 def test_review_missing_file_keeps_reject_and_permanent_delete_available(qtbot, services, tmp_path: Path):
@@ -258,16 +295,66 @@ def test_review_trim_updates_candidate_without_rendering(qtbot, services, tmp_pa
         "Vertical 9:16",
         buffer_start_seconds=0,
         buffer_end_seconds=55,
+        trim_origin_seconds=5,
     ))
     window = MainWindow(services, start_background=False)
     qtbot.addWidget(window)
 
     assert window.review.trim.isEnabled()
+    assert window.review.trim_start.text() == "0:00.0"
+    assert window.review.trim_end.text() == "0:20.0"
+    assert window.review.slider.maximum() == 20_000
+    window.review.slider.setValue(8_000)
+    window.review._trim_changing(7_000, 28_000)
+    assert window.review.slider.maximum() == 21_000
+    assert window.review.slider.value() == 8_000
+    assert window.review.trim_start.text() == "0:02.0"
+    assert window.review.trim_end.text() == "0:23.0"
     window.review._trim_changed(7_000, 28_000)
     updated = services.repositories.candidates.get(int(candidate.id))
     assert updated.render_start == 7
     assert updated.render_end == 28
     assert clip_path.read_bytes() == b"review-buffer"
+
+
+def test_monitoring_task_manager_starts_detected_and_stops_active_jobs(qtbot, services):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_TASK_UI", "Task UI", "", "https://youtube.test/task-ui"
+    ))
+    detected_source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "detected-ui",
+        "Detected but not started",
+        "https://youtube.test/watch?v=detected-ui",
+    ))
+    detected = services.repositories.jobs.create(
+        int(detected_source.id), utc_now(), manual=False
+    )
+    active_source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "active-ui",
+        "Currently analyzing",
+        "https://youtube.test/watch?v=active-ui",
+    ))
+    active = services.repositories.jobs.create(int(active_source.id), utc_now(), manual=True)
+    services.repositories.jobs.update(active.id, JobStatus.ANALYZING, "Gemini ranking", 0.46)
+
+    window = MainWindow(services, start_background=False)
+    qtbot.addWidget(window)
+    window.monitoring.refresh()
+
+    assert window.monitoring.start_detected.text() == "Start detected (1)"
+    assert "Currently analyzing" in window.monitoring.current_task.text()
+    assert "46%" in window.monitoring.current_task.text()
+    window.monitoring.start_detected.click()
+    assert services.repositories.jobs.get(detected.id).approved
+
+    window._cancel_analysis_job(active.id)
+    stopping = services.repositories.jobs.get(active.id)
+    assert stopping.cancel_requested
+    assert stopping.stage == "Stopping…"
 
 
 def test_background_coordinator_never_runs_two_analysis_jobs_at_once(qtbot, services):

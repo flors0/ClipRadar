@@ -11,6 +11,10 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+class OperationCancelled(RuntimeError):
+    """Raised when the user requests a safe stop for background media work."""
+
+
 class JobStatus(StrEnum):
     WAITING = "Waiting"
     SCHEDULED = "Scheduled"
@@ -19,6 +23,7 @@ class JobStatus(StrEnum):
     RENDERING = "Rendering"
     READY = "Ready"
     FAILED = "Failed"
+    CANCELLED = "Cancelled"
 
 
 class ClipStatus(StrEnum):
@@ -90,6 +95,8 @@ class AnalysisJob:
     stage: str
     scheduled_at: str
     manual: bool = False
+    approved: bool = True
+    cancel_requested: bool = False
     attempts: int = 0
     progress: float = 0.0
     error: str | None = None
@@ -151,6 +158,7 @@ class RenderedClip:
     updated_at: str = field(default_factory=utc_now)
     buffer_start_seconds: float | None = None
     buffer_end_seconds: float | None = None
+    trim_origin_seconds: float | None = None
 
     @property
     def path(self) -> Path:

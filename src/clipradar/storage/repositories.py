@@ -36,6 +36,8 @@ def _job(row: Any) -> AnalysisJob:
     data = dict(row)
     data["status"] = JobStatus(data["status"])
     data["manual"] = bool(data["manual"])
+    data["approved"] = bool(data["approved"])
+    data["cancel_requested"] = bool(data["cancel_requested"])
     return AnalysisJob(**data)
 
 
@@ -218,10 +220,15 @@ class JobRepository:
             stage="Queued",
             scheduled_at=scheduled_at,
             manual=manual,
+            approved=manual,
         )
+        if not manual:
+            job.stage = "Awaiting approval"
         values = asdict(job)
         values["status"] = job.status.value
         values["manual"] = int(job.manual)
+        values["approved"] = int(job.approved)
+        values["cancel_requested"] = int(job.cancel_requested)
         columns = ", ".join(values)
         placeholders = ", ".join(f":{name}" for name in values)
         with self.db.connection() as connection:
@@ -243,6 +250,7 @@ class JobRepository:
             row = connection.execute(
                 """SELECT * FROM analysis_jobs
                    WHERE status IN (?, ?) AND scheduled_at <= ?
+                     AND approved = 1 AND cancel_requested = 0
                    ORDER BY manual DESC, scheduled_at, created_at, rowid LIMIT 1""",
                 (JobStatus.WAITING.value, JobStatus.SCHEDULED.value, now),
             ).fetchone()
@@ -253,6 +261,7 @@ class JobRepository:
         with self.db.connection() as connection:
             rows = connection.execute(
                 """SELECT id FROM analysis_jobs WHERE status IN (?, ?)
+                     AND approved = 1 AND cancel_requested = 0
                    ORDER BY manual DESC, scheduled_at, created_at, rowid""",
                 (JobStatus.WAITING.value, JobStatus.SCHEDULED.value),
             ).fetchall()
@@ -282,15 +291,108 @@ class JobRepository:
                 (status.value, stage, max(0.0, min(1.0, progress)), error, int(increment_attempts), utc_now(), job_id),
             )
 
+    def approve(self, job_id: str) -> bool:
+        now = utc_now()
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                """UPDATE analysis_jobs
+                   SET approved = 1, cancel_requested = 0, status = ?, stage = 'Queued',
+                       scheduled_at = ?, error = NULL, updated_at = ?
+                   WHERE id = ? AND status IN (?, ?) AND approved = 0""",
+                (
+                    JobStatus.WAITING.value,
+                    now,
+                    now,
+                    job_id,
+                    JobStatus.WAITING.value,
+                    JobStatus.SCHEDULED.value,
+                ),
+            )
+        return cursor.rowcount == 1
+
+    def request_cancel(self, job_id: str) -> bool:
+        now = utc_now()
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT status FROM analysis_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if not row:
+                return False
+            status = JobStatus(row["status"])
+            if status in {JobStatus.WAITING, JobStatus.SCHEDULED}:
+                connection.execute(
+                    """UPDATE analysis_jobs SET status = ?, stage = 'Cancelled',
+                       cancel_requested = 1, error = NULL, updated_at = ? WHERE id = ?""",
+                    (JobStatus.CANCELLED.value, now, job_id),
+                )
+                return True
+            if status in {JobStatus.DOWNLOADING, JobStatus.ANALYZING, JobStatus.RENDERING}:
+                connection.execute(
+                    """UPDATE analysis_jobs SET stage = 'Stopping…', cancel_requested = 1,
+                       updated_at = ? WHERE id = ?""",
+                    (now, job_id),
+                )
+                return True
+        return False
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT cancel_requested FROM analysis_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+        return bool(row and row["cancel_requested"])
+
+    def mark_cancelled(self, job_id: str) -> None:
+        with self.db.connection() as connection:
+            connection.execute(
+                """UPDATE analysis_jobs SET status = ?, stage = 'Cancelled',
+                   cancel_requested = 1, error = NULL, updated_at = ? WHERE id = ?""",
+                (JobStatus.CANCELLED.value, utc_now(), job_id),
+            )
+
+    def pending_approval_count(self) -> int:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS count FROM analysis_jobs
+                   WHERE approved = 0 AND status IN (?, ?)""",
+                (JobStatus.WAITING.value, JobStatus.SCHEDULED.value),
+            ).fetchone()
+        return int(row["count"])
+
+    def pending_approval_jobs(self) -> list[AnalysisJob]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                """SELECT * FROM analysis_jobs
+                   WHERE approved = 0 AND status IN (?, ?)
+                   ORDER BY created_at, rowid""",
+                (JobStatus.WAITING.value, JobStatus.SCHEDULED.value),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
+    def job_id_for_clip(self, clip_id: int) -> str | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """SELECT j.id FROM rendered_clips r
+                   JOIN analysis_jobs j ON j.source_video_id = r.source_video_id
+                   WHERE r.id = ? ORDER BY j.created_at DESC LIMIT 1""",
+                (clip_id,),
+            ).fetchone()
+        return str(row["id"]) if row else None
+
     def recover_interrupted(self) -> int:
         interrupted = (JobStatus.DOWNLOADING.value, JobStatus.ANALYZING.value, JobStatus.RENDERING.value)
         with self.db.connection() as connection:
+            cancelled = connection.execute(
+                """UPDATE analysis_jobs SET status = ?, stage = 'Cancelled', error = NULL,
+                   updated_at = ? WHERE status IN (?, ?, ?) AND cancel_requested = 1""",
+                (JobStatus.CANCELLED.value, utc_now(), *interrupted),
+            ).rowcount
             cursor = connection.execute(
                 """UPDATE analysis_jobs SET status = ?, stage = 'Recovered after restart', progress = 0,
-                   error = NULL, updated_at = ? WHERE status IN (?, ?, ?)""",
+                   error = NULL, updated_at = ? WHERE status IN (?, ?, ?) AND cancel_requested = 0""",
                 (JobStatus.WAITING.value, utc_now(), *interrupted),
             )
-        return cursor.rowcount
+        return cursor.rowcount + cancelled
 
     def recent(self, limit: int = 8) -> list[dict[str, Any]]:
         with self.db.connection() as connection:
@@ -509,13 +611,15 @@ class ClipRepository:
         with self.db.connection() as connection:
             cursor = connection.execute(
                 """UPDATE rendered_clips SET file_path = ?, duration_seconds = ?, format = ?,
-                   buffer_start_seconds = ?, buffer_end_seconds = ?, updated_at = ? WHERE id = ?""",
+                   buffer_start_seconds = ?, buffer_end_seconds = ?, trim_origin_seconds = ?,
+                   updated_at = ? WHERE id = ?""",
                 (
                     rendered.file_path,
                     rendered.duration_seconds,
                     rendered.format,
                     rendered.buffer_start_seconds,
                     rendered.buffer_end_seconds,
+                    rendered.trim_origin_seconds,
                     utc_now(),
                     clip_id,
                 ),

@@ -95,11 +95,22 @@ QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit {
 }
 QPlainTextEdit { padding: 9px 12px; }
 QPlainTextEdit#ActivityLog {
-    min-height: 240px;
+    min-height: 180px;
     color: #dce2de;
     background: #080b09;
     border-color: #202722;
     font-size: 12px;
+}
+QWidget#TaskRow, QWidget#TaskRowActive {
+    background: #090c0b;
+    border: 1px solid #202722;
+    border-radius: 8px;
+}
+QWidget#TaskRowActive { border-color: #718d16; background: #10150d; }
+QWidget#TaskRow QLabel, QWidget#TaskRowActive QLabel { border: none; background: transparent; }
+QWidget#TaskRow QPushButton, QWidget#TaskRowActive QPushButton {
+    min-height: 28px;
+    padding: 0 9px;
 }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QDateTimeEdit:focus { border-color: #8bae17; }
 QComboBox::drop-down { border: none; width: 30px; }

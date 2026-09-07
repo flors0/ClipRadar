@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clipradar.app.paths import AppPaths
+from clipradar.models import OperationCancelled
 from clipradar.youtube.client import RemoteVideo, YouTubeClient
 
 
@@ -94,3 +97,50 @@ def test_http_403_retries_once_with_direct_stream_and_canonical_url(tmp_path: Pa
     }
     assert "[protocol^=http]" in calls[1][1]["format"]
     assert not list((paths.downloads / "replay-video").glob("*.part"))
+
+
+def test_download_can_be_cancelled_before_network_work(tmp_path: Path, monkeypatch):
+    paths = AppPaths.create(tmp_path)
+
+    class UnexpectedYDL:
+        def __init__(self, _options: dict):
+            raise AssertionError("yt-dlp must not start after cancellation")
+
+    monkeypatch.setattr(YouTubeClient, "_ydl", staticmethod(UnexpectedYDL))
+    with pytest.raises(OperationCancelled):
+        YouTubeClient(paths).download(
+            RemoteVideo(
+                video_id="cancel-video",
+                title="Cancel test",
+                url="https://youtube.com/watch?v=cancel-video",
+                channel_id="UC_TEST",
+            ),
+            cancel_requested=lambda: True,
+        )
+
+
+def test_youtube_feed_supplies_flat_playlist_upload_timestamps(monkeypatch):
+    xml = b"""<?xml version='1.0' encoding='UTF-8'?>
+    <feed xmlns='http://www.w3.org/2005/Atom'
+          xmlns:yt='http://www.youtube.com/xml/schemas/2015'>
+      <entry>
+        <yt:videoId>feed-video</yt:videoId>
+        <published>2026-09-06T20:15:00+00:00</published>
+      </entry>
+    </feed>"""
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self):
+            return xml
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_args, **_kwargs: Response())
+
+    assert YouTubeClient._feed_publish_times("UC_FEED") == {
+        "feed-video": "2026-09-06T20:15:00+00:00"
+    }

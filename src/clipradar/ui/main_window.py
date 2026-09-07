@@ -98,7 +98,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.4.0")
+        version = QLabel("v0.4.1")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -173,6 +173,9 @@ class MainWindow(QMainWindow):
             )
         )
         self.monitoring.check_requested.connect(self._check_channels)
+        self.monitoring.start_detected_requested.connect(self._start_detected_jobs)
+        self.monitoring.start_job_requested.connect(self._start_analysis_job)
+        self.monitoring.cancel_job_requested.connect(self._cancel_analysis_job)
         self.channels.add_requested.connect(self._add_channel)
         self.channels.toggle_requested.connect(
             lambda channel_id, enabled: self._background(
@@ -261,6 +264,33 @@ class MainWindow(QMainWindow):
     def _check_channels(self) -> None:
         self.monitoring.set_monitoring_busy(True)
         self.coordinator.check_channels()
+
+    def _start_detected_jobs(self) -> None:
+        try:
+            count = self.services.channels.start_detected_jobs()
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+            return
+        self.refresh_all()
+        self._toast(f"Started {count} detected video{'s' if count != 1 else ''}")
+
+    def _start_analysis_job(self, job_id: str) -> None:
+        try:
+            self.services.channels.start_job(job_id)
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+            return
+        self.refresh_all()
+        self._toast("Analysis queued")
+
+    def _cancel_analysis_job(self, job_id: str) -> None:
+        try:
+            self.services.channels.cancel_job(job_id)
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+            return
+        self.refresh_all()
+        self._toast("Stopping analysis…")
 
     def _load_dashboard_videos(self, channel_id: int) -> None:
         self._background(
@@ -375,7 +405,10 @@ class MainWindow(QMainWindow):
             self.pipeline_progress.hide()
             self.pipeline_text.setText("No active job")
             self.sidebar_status.setText("●  Ready")
-            self._toast(f"Analysis complete · {result} clip{'s' if result != 1 else ''} ready")
+            if result is None:
+                self._toast("Analysis stopped")
+            else:
+                self._toast(f"Analysis complete · {result} clip{'s' if result != 1 else ''} ready")
         elif key.startswith("regenerate:"):
             self._toast("New render ready for review")
         elif key.startswith("approve:"):
@@ -419,10 +452,18 @@ class MainWindow(QMainWindow):
         self._toast(message, error=True)
         self.refresh_all()
 
-    def _job_progress(self, stage: str, value: float) -> None:
+    def _job_progress(self, job_id: str, stage: str, value: float) -> None:
         self.pipeline_progress.show()
         self.pipeline_progress.setValue(round(value * 1000))
-        self.pipeline_text.setText(stage)
+        title = ""
+        if not job_id.startswith("publish:"):
+            job = self.services.repositories.jobs.get(job_id)
+            source = self.services.repositories.videos.get(job.source_video_id) if job else None
+            title = source.title if source else ""
+            self.monitoring.refresh()
+        self.pipeline_text.setText(
+            f"{title} · {stage} · {round(value * 100)}%" if title else f"{stage} · {round(value * 100)}%"
+        )
         self.sidebar_status.setText("●  Processing")
 
     def _toast(self, message: str, error: bool = False) -> None:

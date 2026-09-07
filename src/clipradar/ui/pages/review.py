@@ -205,6 +205,7 @@ class ReviewPage(QWidget):
         self.records: list[dict] = []
         self.current: dict | None = None
         self._buffer_start_seconds = 0.0
+        self._trim_origin_seconds = 0.0
         self._trim_start_ms = 0
         self._trim_end_ms = 0
         self.selected_channel_id = self.settings.ui_state().review_channel_id
@@ -267,8 +268,8 @@ class ReviewPage(QWidget):
         self.position = muted_label("0:00")
         self.slider = ClickableSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 0)
-        self.slider.sliderMoved.connect(self.player.setPosition)
-        self.slider.seek_requested.connect(self.player.setPosition)
+        self.slider.sliderMoved.connect(self._seek_relative)
+        self.slider.seek_requested.connect(self._seek_relative)
         self.duration = muted_label("0:00")
         controls.addWidget(self.play)
         controls.addWidget(self.position)
@@ -285,7 +286,6 @@ class ReviewPage(QWidget):
         self.trim = TrimRangeSlider()
         self.trim.range_changing.connect(self._trim_changing)
         self.trim.range_changed.connect(self._trim_changed)
-        self.trim.preview_requested.connect(self.player.setPosition)
         trim_row.addWidget(self.trim, 1)
         self.trim_end = muted_label("0:00.0")
         self.trim_end.setMinimumWidth(52)
@@ -414,6 +414,9 @@ class ReviewPage(QWidget):
             self.metadata_status.setText("Metadata —")
             self.trim.set_range(0, 0)
             self.trim.setEnabled(False)
+            self.slider.setRange(0, 0)
+            self.position.setText("0:00")
+            self.duration.setText("0:00")
             self._set_actions(False, False)
 
     def _channel_changed(self, index: int) -> None:
@@ -452,6 +455,11 @@ class ReviewPage(QWidget):
         buffer_end = self.current.get("buffer_end_seconds")
         has_buffer = buffer_start is not None and buffer_end is not None
         self._buffer_start_seconds = float(buffer_start if has_buffer else start)
+        self._trim_origin_seconds = float(
+            self.current.get("trim_origin_seconds")
+            if self.current.get("trim_origin_seconds") is not None
+            else start
+        )
         buffer_duration_ms = round(
             max(0.0, float(buffer_end if has_buffer else end) - self._buffer_start_seconds) * 1000
         )
@@ -467,6 +475,7 @@ class ReviewPage(QWidget):
         )
         self._update_trim_labels()
         self.player.setPosition(self._trim_start_ms)
+        self._sync_playback_range()
         self.timestamp.setText(f"Source {format_time(start)} → {format_time(end)}")
         self.clip_duration.setText(f"Clip {format_time(end - start)}")
         if self.current.get("status") == "Regenerating":
@@ -568,13 +577,18 @@ class ReviewPage(QWidget):
                 self.player.setPosition(self._trim_start_ms)
             self.player.play()
 
+    def _seek_relative(self, position: int) -> None:
+        self.player.setPosition(self._trim_start_ms + max(0, int(position)))
+
     def _playback_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         self.play.setText("Pause" if state == QMediaPlayer.PlaybackState.PlayingState else "Play")
 
     def _position_changed(self, position: int) -> None:
+        selected_duration = max(0, self._trim_end_ms - self._trim_start_ms)
+        relative = max(0, min(selected_duration, position - self._trim_start_ms))
         if not self.slider.isSliderDown():
-            self.slider.setValue(position)
-        self.position.setText(format_time(position / 1000))
+            self.slider.setValue(relative)
+        self.position.setText(format_time(relative / 1000))
         if (
             self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
             and self._trim_end_ms > self._trim_start_ms
@@ -584,13 +598,13 @@ class ReviewPage(QWidget):
             self.player.setPosition(self._trim_end_ms)
 
     def _duration_changed(self, duration: int) -> None:
-        self.slider.setRange(0, duration)
-        self.duration.setText(format_time(duration / 1000))
+        self._sync_playback_range()
 
     def _trim_changing(self, start_ms: int, end_ms: int) -> None:
         self._trim_start_ms = start_ms
         self._trim_end_ms = end_ms
         self._update_trim_labels()
+        self._sync_playback_range(preserve_slider=True)
 
     def _trim_changed(self, start_ms: int, end_ms: int) -> None:
         self._trim_changing(start_ms, end_ms)
@@ -603,14 +617,33 @@ class ReviewPage(QWidget):
     def _update_trim_labels(self) -> None:
         absolute_start = self._buffer_start_seconds + self._trim_start_ms / 1000
         absolute_end = self._buffer_start_seconds + self._trim_end_ms / 1000
-        self.trim_start.setText(_format_precise_time(absolute_start))
-        self.trim_end.setText(_format_precise_time(absolute_end))
+        self.trim_start.setText(
+            _format_signed_precise_time(absolute_start - self._trim_origin_seconds)
+        )
+        self.trim_end.setText(
+            _format_signed_precise_time(absolute_end - self._trim_origin_seconds)
+        )
         self.timestamp.setText(
             f"Source {format_time(absolute_start)} → {format_time(absolute_end)}"
         )
         self.clip_duration.setText(
             f"Clip {_format_precise_time((self._trim_end_ms - self._trim_start_ms) / 1000)}"
         )
+
+    def _sync_playback_range(self, *, preserve_slider: bool = False) -> None:
+        selected_duration = max(0, self._trim_end_ms - self._trim_start_ms)
+        old_value = self.slider.value()
+        self.slider.setRange(0, selected_duration)
+        if preserve_slider:
+            self.slider.setValue(min(old_value, selected_duration))
+        else:
+            relative = max(
+                0,
+                min(selected_duration, self.player.position() - self._trim_start_ms),
+            )
+            self.slider.setValue(relative)
+            self.position.setText(format_time(relative / 1000))
+        self.duration.setText(format_time(selected_duration / 1000))
 
     def _open_file(self) -> None:
         if self.current:
@@ -625,6 +658,11 @@ def _format_precise_time(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     minutes = int(seconds // 60)
     return f"{minutes}:{seconds - minutes * 60:04.1f}"
+
+
+def _format_signed_precise_time(seconds: float) -> str:
+    sign = "−" if seconds < -0.05 else ""
+    return f"{sign}{_format_precise_time(abs(seconds))}"
 
 
 def _available_value(preferred: float | None, fallback: float) -> float:

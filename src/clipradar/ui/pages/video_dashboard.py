@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QResizeEvent
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -35,17 +36,20 @@ class VideoCard(QFrame):
         super().__init__(parent)
         self.video = video
         self.setObjectName("VideoCard")
+        self.setMinimumWidth(240)
+        self.setMaximumWidth(370)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 13)
         layout.setSpacing(9)
-        self.thumbnail = QLabel("Loading thumbnail…")
+        self.thumbnail = ThumbnailLabel("Loading thumbnail…")
         self.thumbnail.setObjectName("VideoThumbnail")
         self.thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumbnail.setMinimumHeight(142)
-        self.thumbnail.setMaximumHeight(182)
+        self.thumbnail.setMinimumHeight(135)
+        self.thumbnail.setMaximumHeight(208)
         self.thumbnail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.thumbnail)
         self.title = QLabel(video.title)
@@ -80,6 +84,44 @@ class VideoCard(QFrame):
             QApplication.clipboard().setText(self.video.url)
         elif selected == analyze_action:
             self.analyze_requested.emit(self.video.url, self.video.title)
+
+
+class ThumbnailLabel(QLabel):
+    """Keep dashboard thumbnails at YouTube's 16:9 ratio without affecting grid width."""
+
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self._source_pixmap: QPixmap | None = None
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        return max(135, min(208, round(width * 9 / 16)))
+
+    def sizeHint(self) -> QSize:
+        return QSize(320, 180)
+
+    def set_source_pixmap(self, pixmap: QPixmap) -> None:
+        self._source_pixmap = pixmap
+        self._refresh_pixmap()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        self._refresh_pixmap()
+
+    def _refresh_pixmap(self) -> None:
+        if not self._source_pixmap or self.width() <= 0 or self.height() <= 0:
+            return
+        scaled = self._source_pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        left = max(0, (scaled.width() - self.width()) // 2)
+        top = max(0, (scaled.height() - self.height()) // 2)
+        self.setPixmap(scaled.copy(left, top, self.width(), self.height()))
 
 
 class VideoDashboardPage(QWidget):
@@ -134,11 +176,13 @@ class VideoDashboardPage(QWidget):
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.container = QWidget()
         self.grid = QGridLayout(self.container)
         self.grid.setContentsMargins(0, 0, 4, 0)
         self.grid.setHorizontalSpacing(14)
         self.grid.setVerticalSpacing(14)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         for column in range(3):
             self.grid.setColumnStretch(column, 1)
         self.scroll.setWidget(self.container)
@@ -221,10 +265,14 @@ class VideoDashboardPage(QWidget):
                     int(channel_id), url, title
                 )
             )
-            self.grid.addWidget(card, index // 3, index % 3)
+            self.grid.addWidget(
+                card,
+                index // 3,
+                index % 3,
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
+            )
             if video.thumbnail_url:
                 self._load_thumbnail(video.thumbnail_url, card.thumbnail)
-        self.grid.setRowStretch((len(videos) + 2) // 3, 1)
         self.status.setText(f"{len(videos)} recent video{'s' if len(videos) != 1 else ''}")
 
     def _analyze(self, channel_id: int, url: str, title: str) -> None:
@@ -264,12 +312,10 @@ class VideoDashboardPage(QWidget):
         if not isValid(label):
             return
         label.setText("")
-        label.setPixmap(pixmap.scaled(
-            max(220, label.width()),
-            max(142, label.height()),
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation,
-        ))
+        if isinstance(label, ThumbnailLabel):
+            label.set_source_pixmap(pixmap)
+        else:
+            label.setPixmap(pixmap)
 
 
 def _relative_upload_time(value: str | None) -> str:
@@ -284,11 +330,8 @@ def _relative_upload_time(value: str | None) -> str:
         return "Upload time unavailable"
     if seconds < 3600:
         minutes = max(1, seconds // 60)
-        return f"Uploaded {minutes} minute{'s' if minutes != 1 else ''} ago"
+        return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
     if seconds < 86400:
         hours = seconds // 3600
-        return f"Uploaded {hours} hour{'s' if hours != 1 else ''} ago"
-    if seconds < 86400 * 30:
-        days = seconds // 86400
-        return f"Uploaded {days} day{'s' if days != 1 else ''} ago"
-    return f"Uploaded {published.astimezone().strftime('%d %b %Y')}"
+        return f"{hours} hour{'s' if hours != 1 else ''} ago"
+    return published.astimezone().strftime("%d.%m.%Y")
