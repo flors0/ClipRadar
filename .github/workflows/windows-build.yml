@@ -78,7 +78,7 @@ jobs:
       - name: Upload verified Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: ClipRadar-Windows-x64-v0.5.0
+          name: ClipRadar-Windows-x64-v0.5.1
           path: ClipRadar-Windows-x64.zip
           if-no-files-found: error
           retention-days: 30

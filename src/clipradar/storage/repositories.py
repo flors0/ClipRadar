@@ -21,6 +21,7 @@ from clipradar.models import (
     utc_now,
 )
 from clipradar.storage.database import Database
+from clipradar.rendering.layout import normalize_output_regions
 
 
 def _channel(row: Any) -> Channel:
@@ -34,7 +35,11 @@ def _video(row: Any) -> SourceVideo:
 
 
 def _framing_profile(row: Any) -> FramingProfile:
-    return FramingProfile(**dict(row))
+    data = dict(row)
+    data["output_regions"] = normalize_output_regions(
+        json.loads(data.pop("output_layout_json") or "{}")
+    )
+    return FramingProfile(**data)
 
 
 def _job(row: Any) -> AnalysisJob:
@@ -50,6 +55,9 @@ def _candidate(row: Any) -> ClipCandidate:
     data = dict(row)
     data["signals"] = json.loads(data.pop("signals_json") or "{}")
     data["ai_tags"] = json.loads(data.pop("ai_tags_json") or "[]")
+    data["output_regions"] = normalize_output_regions(
+        json.loads(data.pop("output_layout_json") or "{}")
+    )
     return ClipCandidate(**data)
 
 
@@ -130,10 +138,15 @@ class ChannelRepository:
             "name", "avatar_url", "url", "monitoring_enabled", "last_checked_at", "last_video_id",
             "analysis_delay_minutes", "max_clips_per_video", "min_duration_seconds",
             "target_duration_seconds", "max_duration_seconds",
+            "clip_selection_instructions",
         }
         changes = {key: value for key, value in changes.items() if key in allowed}
         if not changes:
             return
+        if "clip_selection_instructions" in changes:
+            changes["clip_selection_instructions"] = str(
+                changes["clip_selection_instructions"] or ""
+            ).strip()[:4000]
         changes["updated_at"] = utc_now()
         assignments = ", ".join(f"{key} = :{key}" for key in changes)
         changes["id"] = channel_id
@@ -252,9 +265,13 @@ class FramingProfileRepository:
         ):
             _validate_optional_region(label, region, minimum_size=minimum)
         profile.instructions = profile.instructions.strip()[:4000]
+        profile.output_regions = normalize_output_regions(profile.output_regions)
         profile.updated_at = utc_now()
         values = asdict(profile)
         values.pop("id")
+        values["output_layout_json"] = json.dumps(
+            values.pop("output_regions"), separators=(",", ":")
+        )
         with self.db.connection() as connection:
             connection.execute(
                 """INSERT INTO framing_profiles (
@@ -262,12 +279,14 @@ class FramingProfileRepository:
                        facecam_x, facecam_y, facecam_width, facecam_height,
                        gameplay_x, gameplay_y, gameplay_width, gameplay_height,
                        hud_x, hud_y, hud_width, hud_height,
+                       output_layout_json,
                        reference_source_video_id, reference_seconds, updated_at
                    ) VALUES (
                        :channel_id, :mode, :instructions,
                        :facecam_x, :facecam_y, :facecam_width, :facecam_height,
                        :gameplay_x, :gameplay_y, :gameplay_width, :gameplay_height,
                        :hud_x, :hud_y, :hud_width, :hud_height,
+                       :output_layout_json,
                        :reference_source_video_id, :reference_seconds, :updated_at
                    ) ON CONFLICT(channel_id, mode) DO UPDATE SET
                        instructions = excluded.instructions,
@@ -283,6 +302,7 @@ class FramingProfileRepository:
                        hud_y = excluded.hud_y,
                        hud_width = excluded.hud_width,
                        hud_height = excluded.hud_height,
+                       output_layout_json = excluded.output_layout_json,
                        reference_source_video_id = excluded.reference_source_video_id,
                        reference_seconds = excluded.reference_seconds,
                        updated_at = excluded.updated_at""",
@@ -535,9 +555,10 @@ class CandidateRepository:
                         ai_reason, refined_start_seconds, refined_end_seconds, status, ai_title,
                         ai_description, ai_tags_json, reframe_mode, focus_x, focus_y, facecam_x,
                         facecam_y, facecam_width, facecam_height, gameplay_x, gameplay_y,
-                        gameplay_width, gameplay_height, hud_x, hud_y, hud_width, hud_height)
+                        gameplay_width, gameplay_height, hud_x, hud_y, hud_width, hud_height,
+                        output_layout_json)
                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                               ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         source_video_id, candidate.start_seconds, candidate.end_seconds, candidate.local_score,
                         json.dumps(candidate.signals, separators=(",", ":")), candidate.ai_score,
@@ -548,6 +569,7 @@ class CandidateRepository:
                         candidate.facecam_width, candidate.facecam_height, candidate.gameplay_x,
                         candidate.gameplay_y, candidate.gameplay_width, candidate.gameplay_height,
                         candidate.hud_x, candidate.hud_y, candidate.hud_width, candidate.hud_height,
+                        json.dumps(candidate.output_regions, separators=(",", ":")),
                     ),
                 )
                 candidate.id = cursor.lastrowid
@@ -642,6 +664,7 @@ class CandidateRepository:
         hud_y: float | None = None,
         hud_width: float | None = None,
         hud_height: float | None = None,
+        output_regions: dict[str, tuple[float, float, float, float]] | None = None,
     ) -> None:
         if reframe_mode not in {"auto", "focus", "gaming_split", "center", "contain"}:
             raise ValueError("Select a valid reframe mode.")
@@ -655,16 +678,19 @@ class CandidateRepository:
             "gameplay", (gameplay_x, gameplay_y, gameplay_width, gameplay_height), minimum_size=0.04
         )
         _validate_optional_region("HUD", (hud_x, hud_y, hud_width, hud_height), minimum_size=0.02)
+        normalized_output = normalize_output_regions(output_regions)
         with self.db.connection() as connection:
             connection.execute(
                 """UPDATE clip_candidates SET reframe_mode = ?, focus_x = ?, focus_y = ?,
                    facecam_x = ?, facecam_y = ?, facecam_width = ?, facecam_height = ?,
                    gameplay_x = ?, gameplay_y = ?, gameplay_width = ?, gameplay_height = ?,
-                   hud_x = ?, hud_y = ?, hud_width = ?, hud_height = ? WHERE id = ?""",
+                   hud_x = ?, hud_y = ?, hud_width = ?, hud_height = ?,
+                   output_layout_json = ? WHERE id = ?""",
                 (
                     reframe_mode, focus_x, focus_y, facecam_x, facecam_y,
                     facecam_width, facecam_height, gameplay_x, gameplay_y,
                     gameplay_width, gameplay_height, hud_x, hud_y, hud_width, hud_height,
+                    json.dumps(normalized_output, separators=(",", ":")),
                     candidate_id,
                 ),
             )

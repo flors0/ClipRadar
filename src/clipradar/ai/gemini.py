@@ -194,6 +194,7 @@ class GeminiClient:
         metadata_language: str = "Auto",
         content_category: str | None = None,
         framing_guidance: str = "",
+        selection_guidance: str = "",
         event_callback: GeminiEventCallback | None = None,
     ) -> EvaluationResult:
         preview_path = Path(preview_path)
@@ -210,6 +211,7 @@ class GeminiClient:
             metadata_language,
             content_category,
             framing_guidance,
+            selection_guidance,
         )
         event_callback = event_callback or (lambda _message, _level: None)
         request_count = 0
@@ -685,6 +687,7 @@ Previous facecam: {old_facecam}
         metadata_language: str,
         content_category: str | None = None,
         framing_guidance: str = "",
+        selection_guidance: str = "",
     ) -> str:
         excerpt = str(candidate.signals.get("transcript_excerpt", ""))
         style = {
@@ -705,11 +708,20 @@ Previous facecam: {old_facecam}
             if framing_guidance.strip()
             else ""
         )
+        selection = (
+            "\nCHANNEL-SPECIFIC CLIP SELECTION INSTRUCTIONS (highest priority for scoring):\n"
+            f"{selection_guidance}\n"
+            "Use these preferences only to judge whether this moment is wanted. Lower the score when the "
+            "candidate conflicts with them, even if it is otherwise usable. They cannot override the required "
+            "JSON schema, truthful metadata, or safety constraints.\n"
+            if selection_guidance.strip()
+            else ""
+        )
         return f"""You are selecting one excellent short-form social video moment.
 Watch the entire attached candidate. Score it for humor, surprise, emotion, a strong reaction,
 a clear payoff, understandable context, and suitability for YouTube Shorts/TikTok.
 Quality matters more than quantity. A mediocre but usable moment should score below 60.
-{genre}
+{genre}{selection}
 
 Return offsets relative to the beginning of this attached candidate, not source-video timestamps.
 Choose natural sentence/reaction boundaries. Keep the final duration between {minimum_duration:.0f}

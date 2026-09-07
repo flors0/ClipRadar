@@ -24,8 +24,10 @@ from clipradar.settings.models import AISettings, ClipSettings
 class FakeGemini:
     def __init__(self, score: int = 91):
         self.score = score
+        self.candidate_calls = []
 
-    def analyze_candidate(self, *, candidate, **_kwargs):
+    def analyze_candidate(self, *, candidate, **kwargs):
+        self.candidate_calls.append(kwargs)
         return EvaluationResult(
             score=self.score,
             reason="Strong reaction followed by a clear payoff.",
@@ -210,8 +212,9 @@ def test_renderer_uses_gemini_facecam_and_scene_focus(services, synthetic_video:
     )
     plan = ClipRenderer._video_filter(640, 360, candidate, settings, str(synthetic_video))
     assert plan.complex
-    assert "vstack" in plan.value
-    assert "[face]" in plan.value and "[game]" in plan.value
+    assert "vstack" not in plan.value
+    assert "overlay=0:0" in plan.value
+    assert "pad=360:186" in plan.value
     rendered = services.pipeline.renderer.render(source, candidate, settings)
     info = probe_media(rendered.file_path)
     assert (info.width, info.height) == (360, 640)
@@ -241,15 +244,37 @@ def test_gaming_split_keeps_fixed_proportions_and_adjacent_hud(services, synthet
         hud_y=0.08,
         hud_width=0.20,
         hud_height=0.24,
+        output_regions={
+            "facecam": (0.0, 0.0, 0.45, 0.28),
+            "hud": (0.45, 0.0, 0.55, 0.28),
+            "gameplay": (0.0, 0.28, 1.0, 0.72),
+        },
     )
     settings = ClipSettings(render_width=360, render_height=640, captions_enabled=False)
     plan = ClipRenderer._video_filter(640, 360, candidate, settings, str(synthetic_video))
 
-    assert "scale=360:186" in plan.value
-    assert "scale=360:454" in plan.value
-    face_crop = plan.value.split("[face_source]crop=", 1)[1].split(",scale", 1)[0]
-    face_width = int(face_crop.split(":")[0])
-    assert face_width > 500
+    assert "scale=360:460" in plan.value
+    assert "scale=162:178" in plan.value
+    assert "scale=198:178" in plan.value
+    assert "overlay=0:0" in plan.value
+    assert "overlay=162:0" in plan.value
+    assert "crop=114:86" in plan.value
+    assert "crop=128:86" in plan.value
+    assert "vstack" not in plan.value
+    candidate.id = 501
+    source = SourceVideo(
+        501,
+        1,
+        "independent-layout",
+        "Independent layout",
+        "https://youtube.test/independent-layout",
+        duration_seconds=18,
+        local_path=str(synthetic_video),
+    )
+    rendered = services.pipeline.renderer.render(source, candidate, settings)
+    info = probe_media(rendered.file_path)
+    assert (info.width, info.height) == (360, 640)
+    assert 7.5 <= info.duration <= 8.5
 
 
 def test_saved_channel_profile_overrides_matching_gaming_layout_but_not_dynamic_focus(services):
@@ -268,6 +293,10 @@ def test_saved_channel_profile_overrides_matching_gaming_layout_but_not_dynamic_
         gameplay_y=0.0,
         gameplay_width=0.80,
         gameplay_height=1.0,
+        output_regions={
+            "facecam": (0.0, 0.0, 0.4, 0.25),
+            "gameplay": (0.0, 0.25, 1.0, 0.75),
+        },
     ))
     source = SourceVideo(None, int(channel.id), "layout", "Layout", "https://youtube.test/layout")
     candidate = ClipCandidate(
@@ -288,6 +317,7 @@ def test_saved_channel_profile_overrides_matching_gaming_layout_but_not_dynamic_
 
     assert applied.facecam_x == 0.05
     assert applied.gameplay_width == 0.80
+    assert applied.output_regions["facecam"][2] == 0.4
     assert moved_layout.facecam_x == 0.7
     assert dynamic.focus_x == 0.81
 
@@ -347,6 +377,7 @@ def test_complete_local_pipeline_reaches_review_queue(services, synthetic_video:
     channel = services.repositories.channels.add(Channel(
         None, "UC_E2E", "E2E Channel", "", "https://youtube.test/e2e",
         max_clips_per_video=2, min_duration_seconds=5, target_duration_seconds=8, max_duration_seconds=12,
+        clip_selection_instructions="Prefer complete reactions with an immediate payoff.",
     ))
     source, _ = services.repositories.videos.upsert(SourceVideo(
         None, int(channel.id), "e2e-video", "E2E Source", "https://youtube.test/watch?v=e2e",
@@ -357,6 +388,10 @@ def test_complete_local_pipeline_reaches_review_queue(services, synthetic_video:
     finished = services.repositories.jobs.get(job.id)
     queue = services.repositories.clips.list_review()
     assert rendered_count == 2
+    assert all(
+        call["selection_guidance"].startswith("Prefer complete reactions")
+        for call in services.pipeline.gemini.candidate_calls
+    )
     assert finished.status.value == "Ready"
     assert len(queue) == 2
     assert all(Path(item["file_path"]).exists() for item in queue)

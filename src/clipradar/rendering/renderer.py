@@ -9,6 +9,7 @@ from clipradar.app.paths import AppPaths, bundled_binary
 from clipradar.media.ffmpeg import MediaError, probe_media, run_process
 from clipradar.models import ClipCandidate, ReframeMode, RenderedClip, SourceVideo
 from clipradar.rendering.captions import create_ass_captions
+from clipradar.rendering.layout import resolved_output_regions
 from clipradar.rendering.reframe import detect_face_focus, detect_face_region
 from clipradar.settings.models import ClipSettings
 
@@ -256,11 +257,6 @@ def _gaming_split_filter(
     candidate: ClipCandidate,
     facecam: tuple[float, float, float, float],
 ) -> VideoFilterPlan:
-    # Keep the composition stable across creators: the context strip is always
-    # 29% and gameplay receives the remaining 71%. Gemini locates source
-    # regions; it never gets to invent output proportions per clip.
-    face_height = _even(out_h * 0.29)
-    game_height = out_h - face_height
     gameplay = _candidate_region(
         candidate.gameplay_x,
         candidate.gameplay_y,
@@ -268,15 +264,7 @@ def _gaming_split_filter(
         candidate.gameplay_height,
         minimum_size=0.04,
     )
-    game_focus_x = gameplay[0] + gameplay[2] / 2 if gameplay else _unit(candidate.focus_x)
-    game_focus_y = gameplay[1] + gameplay[3] / 2 if gameplay else _unit(candidate.focus_y)
-    game_w, game_h, game_x, game_y = _crop_for_aspect(
-        source_width,
-        source_height,
-        out_w / game_height,
-        game_focus_x,
-        game_focus_y,
-    )
+    gameplay = gameplay or (0.0, 0.0, 1.0, 1.0)
     hud = _candidate_region(
         candidate.hud_x,
         candidate.hud_y,
@@ -284,22 +272,49 @@ def _gaming_split_filter(
         candidate.hud_height,
         minimum_size=0.02,
     )
-    context_region = _union_regions(facecam, hud) if hud else facecam
-    face_x, face_y, face_w, face_h = _region_crop_for_aspect(
-        source_width,
-        source_height,
-        context_region,
-        out_w / face_height,
+    sources = {"gameplay": gameplay, "facecam": facecam}
+    if hud:
+        sources["hud"] = hud
+    destinations = resolved_output_regions(
+        "gaming_split",
+        candidate.output_regions,
+        sources,
     )
-    value = (
-        "[0:v]split=2[game_source][face_source];"
-        f"[game_source]crop={game_w}:{game_h}:{game_x}:{game_y},"
-        f"scale={out_w}:{game_height}:flags=lanczos[game];"
-        f"[face_source]crop={face_w}:{face_h}:{face_x}:{face_y},"
-        f"scale={out_w}:{face_height}:flags=lanczos[face];"
-        "[face][game]vstack=inputs=2,setsar=1[video_out]"
-    )
-    return VideoFilterPlan(value, complex=True)
+    layers = [key for key in ("gameplay", "facecam", "hud") if key in sources and key in destinations]
+    split_labels = "".join(f"[source_{index}]" for index in range(len(layers)))
+    filters = [
+        f"[0:v]split={len(layers)}{split_labels}",
+        f"color=c=black:s={out_w}x{out_h}:r=30[base]",
+    ]
+    for index, key in enumerate(layers):
+        crop_x, crop_y, crop_w, crop_h = _source_region_pixels(
+            source_width, source_height, sources[key]
+        )
+        dest_x, dest_y, dest_w, dest_h = _output_region_pixels(
+            out_w, out_h, destinations[key]
+        )
+        if key == "gameplay":
+            transform = (
+                f"scale={dest_w}:{dest_h}:force_original_aspect_ratio=increase:"
+                f"force_divisible_by=2:flags=lanczos,crop={dest_w}:{dest_h}"
+            )
+        else:
+            transform = (
+                f"scale={dest_w}:{dest_h}:force_original_aspect_ratio=decrease:"
+                f"force_divisible_by=2:flags=lanczos,"
+                f"pad={dest_w}:{dest_h}:(ow-iw)/2:(oh-ih)/2:color=black"
+            )
+        filters.append(
+            f"[source_{index}]crop={crop_w}:{crop_h}:{crop_x}:{crop_y},{transform},"
+            f"setsar=1[layer_{index}]"
+        )
+        input_label = "base" if index == 0 else f"composite_{index - 1}"
+        output_label = "video_out" if index == len(layers) - 1 else f"composite_{index}"
+        filters.append(
+            f"[{input_label}][layer_{index}]overlay={dest_x}:{dest_y}:shortest=1"
+            f"[{output_label}]"
+        )
+    return VideoFilterPlan(";".join(filters), complex=True)
 
 
 def _contain_filter(out_w: int, out_h: int) -> VideoFilterPlan:
@@ -347,50 +362,30 @@ def _candidate_region(
     return None
 
 
-def _union_regions(
-    first: tuple[float, float, float, float],
-    second: tuple[float, float, float, float],
-) -> tuple[float, float, float, float]:
-    left = min(first[0], second[0])
-    top = min(first[1], second[1])
-    right = max(first[0] + first[2], second[0] + second[2])
-    bottom = max(first[1] + first[3], second[1] + second[3])
-    return left, top, right - left, bottom - top
-
-
-def _region_crop_for_aspect(
+def _source_region_pixels(
     source_width: int,
     source_height: int,
     region: tuple[float, float, float, float],
-    target_aspect: float,
 ) -> tuple[int, int, int, int]:
     x, y, width, height = region
-    pad_x = max(0.012, width * 0.10)
-    pad_y = max(0.012, height * 0.10)
-    left = max(0.0, x - pad_x) * source_width
-    top = max(0.0, y - pad_y) * source_height
-    right = min(1.0, x + width + pad_x) * source_width
-    bottom = min(1.0, y + height + pad_y) * source_height
-    region_w = max(2.0, right - left)
-    region_h = max(2.0, bottom - top)
-    if region_w / region_h > target_aspect:
-        crop_w = region_w
-        crop_h = crop_w / target_aspect
-    else:
-        crop_h = region_h
-        crop_w = crop_h * target_aspect
-    if crop_w > source_width or crop_h > source_height:
-        center_x = (left + right) / 2 / max(1, source_width)
-        center_y = (top + bottom) / 2 / max(1, source_height)
-        width, height, crop_x, crop_y = _crop_for_aspect(
-            source_width, source_height, target_aspect, center_x, center_y
-        )
-        return crop_x, crop_y, width, height
-    center_x = (left + right) / 2
-    center_y = (top + bottom) / 2
-    crop_x = max(0.0, min(source_width - crop_w, center_x - crop_w / 2))
-    crop_y = max(0.0, min(source_height - crop_h, center_y - crop_h / 2))
-    return _even_position(crop_x), _even_position(crop_y), _even(crop_w), _even(crop_h)
+    crop_x = min(source_width - 2, _even_position(max(0.0, x) * source_width))
+    crop_y = min(source_height - 2, _even_position(max(0.0, y) * source_height))
+    crop_w = min(source_width - crop_x, _even(max(0.0, width) * source_width))
+    crop_h = min(source_height - crop_y, _even(max(0.0, height) * source_height))
+    return crop_x, crop_y, crop_w, crop_h
+
+
+def _output_region_pixels(
+    output_width: int,
+    output_height: int,
+    region: tuple[float, float, float, float],
+) -> tuple[int, int, int, int]:
+    x, y, width, height = region
+    box_w = min(output_width, _even(width * output_width))
+    box_h = min(output_height, _even(height * output_height))
+    box_x = max(0, min(output_width - box_w, round(x * output_width)))
+    box_y = max(0, min(output_height - box_h, round(y * output_height)))
+    return box_x, box_y, box_w, box_h
 
 
 def _unit(value: float | int | None) -> float:

@@ -144,3 +144,49 @@ def test_youtube_feed_supplies_flat_playlist_upload_timestamps(monkeypatch):
     assert YouTubeClient._feed_publish_times("UC_FEED") == {
         "feed-video": "2026-09-06T20:15:00+00:00"
     }
+
+
+def test_recent_videos_resolve_only_dates_missing_from_flat_playlist_and_feed(
+    tmp_path: Path,
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    class FakeYDL:
+        def __init__(self, options: dict):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url: str, download: bool):
+            calls.append(url)
+            if url.endswith("/videos"):
+                return {
+                    "channel_id": "UC_METADATA",
+                    "entries": [
+                        {"id": "dated", "title": "Dated", "timestamp": 1788724800},
+                        {"id": "missing", "title": "Missing date", "view_count": 1200},
+                    ],
+                }
+            assert download is False
+            return {
+                "id": "missing",
+                "title": "Missing date",
+                "channel_id": "UC_METADATA",
+                "upload_date": "20260905",
+                "view_count": 1300,
+            }
+
+    monkeypatch.setattr(YouTubeClient, "_ydl", staticmethod(FakeYDL))
+    monkeypatch.setattr(YouTubeClient, "_feed_publish_times", staticmethod(lambda _channel: {}))
+    client = YouTubeClient(AppPaths.create(tmp_path))
+
+    videos = client.list_recent_videos("https://youtube.test/channel", limit=2)
+
+    assert videos[0].published_at is not None
+    assert videos[1].published_at.startswith("2026-09-05")
+    assert len(calls) == 2

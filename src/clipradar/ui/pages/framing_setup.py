@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from clipradar.models import ClipCandidate, FramingProfile, SourceVideo
+from clipradar.rendering.layout import resolved_output_regions
 from clipradar.storage.repositories import Repositories
 from clipradar.ui.common import card_layout, format_time, muted_label, title_label
 from clipradar.ui.framing_widgets import LiveFramingPreview, REGION_SPECS, RegionCanvas
@@ -45,6 +46,7 @@ class FramingSetupPage(QWidget):
         self._frame: QPixmap | None = None
         self._drafts: dict[str, FramingProfile] = {}
         self._current_mode = "gaming_split"
+        self._selection_instructions = ""
         self._test_path: Path | None = None
         self.audio = QAudioOutput(self)
         self.audio.setVolume(0.75)
@@ -103,7 +105,7 @@ class FramingSetupPage(QWidget):
         layout.setContentsMargins(0, 14, 0, 0)
         layout.setSpacing(10)
         tools = QHBoxLayout()
-        tools.addWidget(muted_label("Draw or adjust source regions"))
+        tools.addWidget(muted_label("Select a layer, then adjust its source box and portrait slot"))
         tools.addSpacing(8)
         self.region_group = QButtonGroup(self)
         self.region_group.setExclusive(True)
@@ -111,7 +113,7 @@ class FramingSetupPage(QWidget):
         for key, (label, _color, _default) in REGION_SPECS.items():
             button = QPushButton(label)
             button.setCheckable(True)
-            button.clicked.connect(lambda _checked=False, region=key: self.canvas.select_region(region))
+            button.clicked.connect(lambda _checked=False, region=key: self._select_region(region))
             self.region_group.addButton(button)
             self.region_buttons[key] = button
             tools.addWidget(button)
@@ -155,6 +157,8 @@ class FramingSetupPage(QWidget):
         preview_layout.addLayout(preview_header)
         self.preview_stack = QStackedWidget()
         self.live_preview = LiveFramingPreview()
+        self.live_preview.regions_changed.connect(self._output_regions_changed)
+        self.live_preview.active_changed.connect(self._active_changed)
         self.test_video = QVideoWidget()
         self.test_video.setStyleSheet("background:#000;border:1px solid #242b27;border-radius:8px")
         self.player.setVideoOutput(self.test_video)
@@ -174,18 +178,40 @@ class FramingSetupPage(QWidget):
         layout.setContentsMargins(0, 14, 0, 0)
         layout.setSpacing(12)
         intro, intro_layout = card_layout(object_name="InsetCard")
-        intro_layout.addWidget(title_label("Built-in framing rules"))
+        intro_layout.addWidget(title_label("Built-in safety and rendering rules"))
         intro_layout.addWidget(muted_label(
             "ClipRadar always keeps the selected mode, valid normalized coordinates, stable output proportions, "
             "and safe rendering constraints. These technical rules cannot be overridden.",
             wrap=True,
         ))
         layout.addWidget(intro)
+        prompts = QSplitter(Qt.Orientation.Horizontal)
+        selection_card, selection_layout = card_layout(object_name="InsetCard")
+        selection_layout.addWidget(title_label("Clip selection instructions"))
+        selection_layout.addWidget(muted_label(
+            "Channel-wide. Describe the moments, scenes, reactions, topics, or pacing you want Gemini to "
+            "prefer or avoid when scoring clip candidates.",
+            wrap=True,
+        ))
+        self.selection_instructions = QPlainTextEdit()
+        self.selection_instructions.setPlaceholderText(
+            "Example: Prefer surprising outplays with a clear reaction and payoff. Avoid slow build-up, "
+            "routine farming, and moments that require earlier context."
+        )
+        self.selection_instructions.setMinimumHeight(230)
+        self.selection_instructions.textChanged.connect(self._selection_instructions_changed)
+        selection_layout.addWidget(self.selection_instructions, 1)
+        self.selection_character_count = muted_label("0 / 4000")
+        selection_layout.addWidget(
+            self.selection_character_count, 0, Qt.AlignmentFlag.AlignRight
+        )
+        prompts.addWidget(selection_card)
+
         prompt_card, prompt_layout = card_layout(object_name="InsetCard")
-        prompt_layout.addWidget(title_label("Channel-specific Gemini instructions"))
+        prompt_layout.addWidget(title_label("Framing instructions"))
         prompt_layout.addWidget(muted_label(
-            "Your instructions have priority for composition. Describe recurring layout details, what must stay "
-            "visible, and what Gemini should avoid. They apply only to this channel and selected profile.",
+            "Profile-specific. Describe recurring layout details, what must stay visible, and what Gemini "
+            "should avoid for the selected framing mode.",
             wrap=True,
         ))
         self.instructions = QPlainTextEdit()
@@ -198,7 +224,9 @@ class FramingSetupPage(QWidget):
         prompt_layout.addWidget(self.instructions, 1)
         self.character_count = muted_label("0 / 4000")
         prompt_layout.addWidget(self.character_count, 0, Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(prompt_card, 1)
+        prompts.addWidget(prompt_card)
+        prompts.setSizes([600, 600])
+        layout.addWidget(prompts, 1)
         return tab
 
     def open_from_clip(self, clip_id: int) -> None:
@@ -240,6 +268,11 @@ class FramingSetupPage(QWidget):
         self.candidate = candidate
         self._drafts.clear()
         channel = self.repos.channels.get(channel_id)
+        self._selection_instructions = channel.clip_selection_instructions if channel else ""
+        self.selection_instructions.blockSignals(True)
+        self.selection_instructions.setPlainText(self._selection_instructions)
+        self.selection_instructions.blockSignals(False)
+        self.selection_character_count.setText(f"{len(self._selection_instructions)} / 4000")
         self.channel_title.setText(f"{channel.name if channel else 'Channel'} framing profile")
         self.source_title.setText(source.title if source else "No downloaded source yet · instructions can still be saved")
         self._current_mode = initial_mode
@@ -305,6 +338,7 @@ class FramingSetupPage(QWidget):
                     "hud_x", "hud_y", "hud_width", "hud_height",
                 ):
                     setattr(profile, field, getattr(self.candidate, field))
+                profile.output_regions = dict(self.candidate.output_regions)
             self._drafts[mode] = profile
 
     def _load_mode(self, mode: str) -> None:
@@ -314,6 +348,14 @@ class FramingSetupPage(QWidget):
         self.instructions.blockSignals(False)
         self.character_count.setText(f"{len(profile.instructions)} / 4000")
         self.canvas.set_regions(_profile_regions(profile))
+        outputs = resolved_output_regions(
+            mode,
+            profile.output_regions,
+            self.canvas.regions,
+        )
+        self.live_preview.set_output_regions(
+            {key: QRectF(*value) for key, value in outputs.items()}
+        )
         self._show_live()
 
     def _mode_changed(self, index: int) -> None:
@@ -332,6 +374,7 @@ class FramingSetupPage(QWidget):
         profile.reference_source_video_id = self.source.id if self.source else profile.reference_source_video_id
         profile.reference_seconds = self.reference_seconds
         _set_profile_regions(profile, self.canvas.regions)
+        profile.output_regions = _canvas_regions(self.live_preview.output_regions)
 
     def _configure_source(self) -> None:
         duration = float(self.source.duration_seconds or 0) if self.source else 0
@@ -353,6 +396,9 @@ class FramingSetupPage(QWidget):
     def _regions_changed(self) -> None:
         self._show_live()
 
+    def _output_regions_changed(self) -> None:
+        self._show_live()
+
     def _active_changed(self, key: str) -> None:
         button = self.region_buttons.get(key)
         if button:
@@ -360,30 +406,51 @@ class FramingSetupPage(QWidget):
 
     def _remove_active(self) -> None:
         self.canvas.remove_active()
+        self.live_preview.remove_active()
+
+    def _select_region(self, key: str) -> None:
+        self.canvas.select_region(key)
+        self.live_preview.select_region(key)
 
     def _show_live(self) -> None:
         self.player.stop()
         self.preview_stack.setCurrentWidget(self.live_preview)
         self.preview_badge.setText("Layout preview")
-        self.live_preview.update_plan(self._frame, self.canvas.regions, self._current_mode)
+        self.live_preview.update_plan(
+            self._frame,
+            self.canvas.regions,
+            self._current_mode,
+            self.live_preview.output_regions,
+        )
 
     def _instructions_changed(self) -> None:
-        text = self.instructions.toPlainText()
+        self._limit_editor(self.instructions, self.character_count)
+
+    def _selection_instructions_changed(self) -> None:
+        self._limit_editor(self.selection_instructions, self.selection_character_count)
+
+    @staticmethod
+    def _limit_editor(editor: QPlainTextEdit, counter: QLabel) -> None:
+        text = editor.toPlainText()
         if len(text) > 4000:
-            cursor = self.instructions.textCursor()
+            cursor = editor.textCursor()
             position = min(cursor.position(), 4000)
-            self.instructions.blockSignals(True)
-            self.instructions.setPlainText(text[:4000])
-            cursor = self.instructions.textCursor()
+            editor.blockSignals(True)
+            editor.setPlainText(text[:4000])
+            cursor = editor.textCursor()
             cursor.setPosition(position)
-            self.instructions.setTextCursor(cursor)
-            self.instructions.blockSignals(False)
+            editor.setTextCursor(cursor)
+            editor.blockSignals(False)
             text = text[:4000]
-        self.character_count.setText(f"{len(text)} / 4000")
+        counter.setText(f"{len(text)} / 4000")
 
     def _save(self) -> None:
         try:
             profile = self.repos.framing_profiles.save(self.current_profile())
+            self.repos.channels.update(
+                int(self.channel_id),
+                clip_selection_instructions=self.selection_instructions.toPlainText().strip()[:4000],
+            )
         except Exception as exc:
             self.state.setText(str(exc))
             return
@@ -443,6 +510,18 @@ def _set_profile_regions(profile: FramingProfile, regions: dict[str, QRectF]) ->
             setattr(profile, f"{key}_{suffix}", round(float(value), 5) if value is not None else None)
 
 
+def _canvas_regions(regions: dict[str, QRectF]) -> dict[str, tuple[float, float, float, float]]:
+    return {
+        key: (
+            round(region.x(), 5),
+            round(region.y(), 5),
+            round(region.width(), 5),
+            round(region.height(), 5),
+        )
+        for key, region in regions.items()
+    }
+
+
 def _read_frame(path: Path, seconds: float) -> QPixmap | None:
     try:
         import cv2
@@ -472,6 +551,5 @@ def _video_duration(path: Path) -> float:
         return frames / fps if fps > 0 else 0.0
     except Exception:
         return 0.0
-
 
 

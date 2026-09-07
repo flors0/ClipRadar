@@ -13,15 +13,16 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Establish a safe baseline when a channel is first added so old uploads are not analyzed without limit.
 - Check a bounded recent-upload window, hold detected videos at 0% for explicit approval, and process approved jobs sequentially.
 - Manually analyze the latest upload or a specific video.
-- Browse each configured channel's recent uploads in a compact YouTube-style three-column Dashboard without downloading them; public view counts appear beside relative times for the first 24 hours and dates afterward.
+- Browse each configured channel's recent uploads in a compact YouTube-style three-column Dashboard without downloading them; public view counts appear beside relative times for the first 24 hours and dates afterward, with a detailed metadata fallback for dates omitted by the flat feed.
 - Download source media first, retry a rejected HLS stream once through a direct format, then fetch at most one available English VTT caption track as an optional best-effort enhancement.
 - Preselect candidate ranges locally using audio energy, transcript reactions, scene changes, and YouTube heatmap data when available.
 - Send only compressed candidate previews to the selected Gemini model.
 - Validate Gemini finish reasons and retry one incomplete structured response with a larger output budget across every selectable model.
 - Apply hard daily limits for videos, source minutes, clips, and estimated AI cost.
 - De-duplicate overlapping moments and render only the best candidates.
-- Ask Gemini to locate facecam, gameplay, and relevant HUD/stat regions, keep a stable 29/71 context-to-gameplay layout, and verify one draft render before it reaches Review.
-- Open a full-size Framing Setup from Review or a channel's Manage menu, draw reusable Facecam, main-content, and HUD regions, add per-channel Gemini instructions, auto-detect a proposal, and render a short local test.
+- Ask Gemini to locate facecam, gameplay, and relevant HUD/stat regions and verify one draft render before it reaches Review.
+- Open a full-size Framing Setup from Review or a channel's Manage menu, draw reusable source regions, independently drag and resize their portrait output slots, add separate channel-wide clip-selection and profile-specific framing instructions, auto-detect a proposal, and render a short local test.
+- Composite gameplay, facecam, and HUD as independent aspect-preserving layers so a compact HUD can remain readable instead of shrinking inside a combined context crop.
 - Persist separate Facecam + gameplay and Important subject profiles per channel. Saved split layouts remain stable while Important subject still follows each clip's current action.
 - Regenerate framing by having Gemini compare the exact original segment with the current vertical render, for Important subject, Facecam + gameplay, and every selectable framing mode.
 - Render 9:16 H.264 MP4 with scene-aware reframing and loudness normalization. Burned captions are disabled by default.
@@ -86,7 +87,7 @@ python -m pytest -q
 python -m clipradar --self-test
 ```
 
-Tests cover persistence and migration, secure-secret separation, deterministic sequential scheduling, channel browsing, channel-filtered review, buffered manual trimming, local candidate selection, Gemini's structured metadata/semantic-framing schemas, automatic and manual AI framing checks, real FFmpeg focus and fixed-proportion gaming-split rendering, the full pipeline through review, mocked resumable YouTube upload/scheduling, UI navigation, and the packaged executable.
+Tests cover persistence and migration, secure-secret separation, deterministic sequential scheduling, channel browsing and metadata fallbacks, channel-filtered review, buffered manual trimming, local candidate selection, Gemini's structured metadata/semantic-framing schemas, channel-specific selection guidance, automatic and manual AI framing checks, real FFmpeg focus and independent-layer gaming rendering, the full pipeline through review, mocked resumable YouTube upload/scheduling, UI navigation, and the packaged executable.
 
 ## Runtime data
 
