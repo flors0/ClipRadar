@@ -36,11 +36,19 @@ def run_self_test() -> int:
         assert services.settings.secrets.get_gemini_key() == "self-test-only"
         with services.database.connection() as connection:
             tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            job_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(analysis_jobs)")
+            }
+            clip_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(rendered_clips)")
+            }
         required = {
             "channels", "source_videos", "analysis_jobs", "clip_candidates", "rendered_clips",
             "youtube_accounts", "publish_jobs", "settings", "ai_usage",
         }
         assert required <= tables
+        assert {"approved", "cancel_requested"} <= job_columns
+        assert "trim_origin_seconds" in clip_columns
         assert Path(bundled_binary("ffmpeg")).exists()
         assert Path(bundled_binary("ffprobe")).exists()
         assert resource_path("resources/theme.qss").exists()

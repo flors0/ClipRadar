@@ -9,15 +9,17 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QProgressBar,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from clipradar.models import JobStatus
 from clipradar.storage.repositories import Repositories
-from clipradar.ui.common import card_layout, muted_label, status_pill, title_label
+from clipradar.ui.common import card_layout, clear_layout, muted_label, status_pill, title_label
 
 
 class MetricCard(QWidget):
@@ -44,6 +46,9 @@ class MetricCard(QWidget):
 
 class MonitoringPage(QWidget):
     check_requested = Signal()
+    start_detected_requested = Signal()
+    start_job_requested = Signal(str)
+    cancel_job_requested = Signal(str)
 
     def __init__(self, repositories: Repositories, parent: QWidget | None = None):
         super().__init__(parent)
@@ -67,6 +72,10 @@ class MonitoringPage(QWidget):
         self.check_button = QPushButton("Check now")
         self.check_button.clicked.connect(self.check_requested)
         toolbar_row.addWidget(self.check_button)
+        self.start_detected = QPushButton("Start detected")
+        self.start_detected.setObjectName("PrimaryButton")
+        self.start_detected.clicked.connect(self.start_detected_requested)
+        toolbar_row.addWidget(self.start_detected)
         toolbar_layout.addLayout(toolbar_row)
         root.addWidget(toolbar)
 
@@ -82,8 +91,27 @@ class MonitoringPage(QWidget):
             "minutes": MetricCard("Source minutes", detail="analyzed today"),
         }
         for index, metric in enumerate(self.metrics.values()):
-            metrics.addWidget(metric, index // 3, index % 3)
+            metrics.addWidget(metric, 0, index)
         root.addLayout(metrics)
+
+        tasks_card, tasks_layout = card_layout()
+        task_header = QHBoxLayout()
+        task_header.addWidget(title_label("Analysis tasks"))
+        task_header.addStretch(1)
+        self.current_task = muted_label("No active analysis")
+        task_header.addWidget(self.current_task)
+        tasks_layout.addLayout(task_header)
+        self.task_scroll = QScrollArea()
+        self.task_scroll.setWidgetResizable(True)
+        self.task_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.task_scroll.setMaximumHeight(142)
+        self.task_container = QWidget()
+        self.task_layout = QVBoxLayout(self.task_container)
+        self.task_layout.setContentsMargins(0, 0, 0, 0)
+        self.task_layout.setSpacing(6)
+        self.task_scroll.setWidget(self.task_container)
+        tasks_layout.addWidget(self.task_scroll)
+        root.addWidget(tasks_card)
 
         activity_card, activity_layout = card_layout()
         header = QHBoxLayout()
@@ -100,7 +128,7 @@ class MonitoringPage(QWidget):
         self.activity_log.setObjectName("ActivityLog")
         self.activity_log.setReadOnly(True)
         self.activity_log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.activity_log.setMinimumHeight(260)
+        self.activity_log.setMinimumHeight(180)
         self.activity_log.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont))
         self.activity_log.setPlaceholderText(
             "Activity will appear here once channels are checked or videos are analyzed."
@@ -126,6 +154,11 @@ class MonitoringPage(QWidget):
         self.metrics["cost"].set_value(f"€{usage['estimated_cost_eur']:.3f}")
         self.metrics["minutes"].set_value(f"{usage['source_minutes']:.1f}")
 
+        pending = self.repos.jobs.pending_approval_count()
+        self.start_detected.setText(f"Start detected ({pending})")
+        self.start_detected.setEnabled(pending > 0)
+        self._refresh_tasks(self.repos.jobs.recent(12))
+
         activities = self.repos.activity.recent(200)
         runs = len({item["job_id"] for item in activities if item["job_id"]})
         count_text = f"{len(activities)} event{'s' if len(activities) != 1 else ''}"
@@ -136,6 +169,78 @@ class MonitoringPage(QWidget):
         cursor = self.activity_log.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         self.activity_log.setTextCursor(cursor)
+
+    def _refresh_tasks(self, jobs: list[dict]) -> None:
+        clear_layout(self.task_layout)
+        active_statuses = {
+            JobStatus.DOWNLOADING.value,
+            JobStatus.ANALYZING.value,
+            JobStatus.RENDERING.value,
+        }
+        active = next((job for job in jobs if job["status"] in active_statuses), None)
+        if active:
+            self.current_task.setText(
+                f"Active · {active['video_title']} · {round(float(active['progress']) * 100)}%"
+            )
+        else:
+            self.current_task.setText("No active analysis")
+        if not jobs:
+            self.task_layout.addWidget(muted_label("No analysis tasks yet."))
+            return
+        for job in jobs:
+            row = QWidget()
+            row.setObjectName("TaskRowActive" if active and job["id"] == active["id"] else "TaskRow")
+            layout = QHBoxLayout(row)
+            layout.setContentsMargins(9, 5, 9, 5)
+            layout.setSpacing(9)
+            title = QLabel(str(job["video_title"]))
+            title.setToolTip(str(job["video_title"]))
+            title.setMinimumWidth(190)
+            layout.addWidget(title, 3)
+            stage = muted_label(str(job["stage"]))
+            stage.setMinimumWidth(110)
+            layout.addWidget(stage, 2)
+            progress = QProgressBar()
+            progress.setRange(0, 100)
+            progress.setValue(round(float(job["progress"]) * 100))
+            progress.setTextVisible(False)
+            progress.setFixedHeight(7)
+            layout.addWidget(progress, 2)
+            percent = muted_label(f"{round(float(job['progress']) * 100)}%")
+            percent.setFixedWidth(36)
+            layout.addWidget(percent)
+            button = QPushButton()
+            button.setFixedWidth(66)
+            approved = bool(job.get("approved"))
+            status = str(job["status"])
+            can_start = not approved and status in {
+                JobStatus.WAITING.value,
+                JobStatus.SCHEDULED.value,
+            }
+            can_stop = status in {
+                JobStatus.WAITING.value,
+                JobStatus.SCHEDULED.value,
+                *active_statuses,
+            } and not bool(job.get("cancel_requested"))
+            if can_start:
+                button.setText("Start")
+                button.clicked.connect(
+                    lambda _checked=False, job_id=str(job["id"]): self.start_job_requested.emit(job_id)
+                )
+            elif can_stop:
+                button.setText("Stop")
+                button.setObjectName("DangerButton")
+                button.clicked.connect(
+                    lambda _checked=False, job_id=str(job["id"]): self.cancel_job_requested.emit(job_id)
+                )
+            elif bool(job.get("cancel_requested")) and status in active_statuses:
+                button.setText("Stopping")
+                button.setEnabled(False)
+            else:
+                button.setText(status)
+                button.setEnabled(False)
+            layout.addWidget(button)
+            self.task_layout.addWidget(row)
 
     def _copy_logs(self) -> None:
         text = self.activity_log.toPlainText()
@@ -149,7 +254,7 @@ class MonitoringPage(QWidget):
 def _format_activity_log(activities: list[dict]) -> str:
     groups: dict[str, list[dict]] = {}
     for item in activities:
-        key = str(item["job_id"] or f"event:{item['id']}")
+        key = str(item["job_id"] or "application")
         groups.setdefault(key, []).append(item)
     sections: list[str] = []
     for key, items in groups.items():
@@ -163,7 +268,10 @@ def _format_activity_log(activities: list[dict]) -> str:
             metadata.append(channel)
         if newest.get("job_id"):
             attempt = int(newest.get("attempt") or 0)
-            metadata.append(f"Attempt {max(1, attempt)}")
+            if attempt:
+                metadata.append(f"Attempt {attempt}")
+            else:
+                metadata.append("Not started")
             metadata.append(f"Job {str(newest['job_id'])[:8]}")
         status = str(newest.get("operation_status") or "").strip()
         if status:

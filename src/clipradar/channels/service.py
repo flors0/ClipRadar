@@ -81,9 +81,48 @@ class ChannelService:
         source = self._store_remote(channel, remote, category_id=category_id)
         return self._queue(source, manual=True, scheduled_at=utc_now())
 
-    def dashboard_videos(self, channel_id: int, limit: int = 18) -> tuple[int, list[RemoteVideo]]:
+    def dashboard_videos(self, channel_id: int, limit: int = 15) -> tuple[int, list[RemoteVideo]]:
         channel = self._require_channel(channel_id)
         return int(channel.id), self.youtube.list_recent_videos(channel.url, limit)
+
+    def start_job(self, job_id: str) -> None:
+        job = self.repos.jobs.get(job_id)
+        if not job:
+            raise ValueError("The analysis task no longer exists.")
+        source = self.repos.videos.get(job.source_video_id)
+        if not source:
+            raise ValueError("The source video no longer exists.")
+        if not self.repos.jobs.approve(job_id):
+            raise ValueError("This analysis task cannot be started.")
+        position = self.repos.jobs.queue_position(job_id)
+        suffix = f" · sequential queue position {position}" if position is not None else ""
+        self.repos.activity.add(f"Queued {source.title}{suffix}", job_id=job_id)
+
+    def start_detected_jobs(self) -> int:
+        jobs = self.repos.jobs.pending_approval_jobs()
+        started = 0
+        for job in jobs:
+            try:
+                self.start_job(job.id)
+            except ValueError:
+                continue
+            started += 1
+        return started
+
+    def cancel_job(self, job_id: str) -> None:
+        job = self.repos.jobs.get(job_id)
+        if not job:
+            raise ValueError("The analysis task no longer exists.")
+        source = self.repos.videos.get(job.source_video_id)
+        if not self.repos.jobs.request_cancel(job_id):
+            raise ValueError("This analysis task is no longer running or queued.")
+        refreshed = self.repos.jobs.get(job_id)
+        message = (
+            f"Analysis cancelled · {source.title if source else job_id}"
+            if refreshed and refreshed.status.value == "Cancelled"
+            else f"Stop requested · {source.title if source else job_id}"
+        )
+        self.repos.activity.add(message, "warning", job_id)
 
     def scan_all(self) -> ScanResult:
         config = self.settings.monitoring()
@@ -152,13 +191,24 @@ class ChannelService:
         if self.repos.jobs.has_active_for_video(int(source.id)):
             raise ValueError("This video already has an active analysis job.")
         job = self.repos.jobs.create(int(source.id), scheduled_at=scheduled_at, manual=manual)
+        duration = _format_duration(source.duration_seconds)
+        self.repos.activity.add(
+            f"Video {'selected' if manual else 'found'} · {source.title} · {duration}",
+            job_id=job.id,
+        )
         position = self.repos.jobs.queue_position(job.id)
         position_suffix = f" · sequential queue position {position}" if position is not None else ""
         category_name = YOUTUBE_CATEGORY_NAMES.get(source.category_id or "")
         category_suffix = f" · genre {category_name}" if category_name else ""
-        self.repos.activity.add(
-            f"Queued {source.title}{position_suffix}{category_suffix}", job_id=job.id
-        )
+        if manual:
+            self.repos.activity.add(
+                f"Queued {source.title}{position_suffix}{category_suffix}", job_id=job.id
+            )
+        else:
+            self.repos.activity.add(
+                f"Waiting for approval{category_suffix} · press Start to analyze",
+                job_id=job.id,
+            )
         return job.id
 
     def _require_channel(self, channel_id: int) -> Channel:
@@ -175,3 +225,14 @@ class ChannelService:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return None
+
+
+def _format_duration(seconds: float | None) -> str:
+    if seconds is None or seconds <= 0:
+        return "duration unavailable"
+    rounded = round(seconds)
+    hours, remainder = divmod(rounded, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{remaining_seconds:02d}"
+    return f"{minutes}:{remaining_seconds:02d}"

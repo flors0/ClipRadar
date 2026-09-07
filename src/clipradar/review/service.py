@@ -18,7 +18,9 @@ class ReviewService:
             raise FileNotFoundError("The rendered clip file is missing.")
         self.pipeline.finalize_review_clip(clip_id)
         self.repos.clips.update_status(clip_id, ClipStatus.APPROVED)
-        self.repos.activity.add("Clip approved", "success")
+        self.repos.activity.add(
+            "Clip approved", "success", self.repos.jobs.job_id_for_clip(clip_id)
+        )
 
     def finalize_for_publish(self, clip_id: int) -> None:
         clip = self._require(clip_id)
@@ -48,10 +50,11 @@ class ReviewService:
     def reject(self, clip_id: int) -> None:
         self._require(clip_id)
         self.repos.clips.update_status(clip_id, ClipStatus.REJECTED)
-        self.repos.activity.add("Clip rejected")
+        self.repos.activity.add("Clip rejected", job_id=self.repos.jobs.job_id_for_clip(clip_id))
 
     def delete_permanently(self, clip_id: int) -> None:
         clip = self._require(clip_id)
+        job_id = self.repos.jobs.job_id_for_clip(clip_id)
         if clip.status == ClipStatus.REGENERATING:
             raise RuntimeError("Wait for the active regeneration to finish before deleting this clip.")
         path = Path(clip.file_path)
@@ -74,7 +77,7 @@ class ReviewService:
             if file_existed
             else f"Clip #{clip_id} removed from the review queue · file was already missing"
         )
-        self.repos.activity.add(message, "warning")
+        self.repos.activity.add(message, "warning", job_id)
 
     def prepare_regeneration(self, clip_id: int, reframe_mode: str | None = None) -> tuple[int, str]:
         clip = self._require(clip_id)
@@ -94,6 +97,7 @@ class ReviewService:
 
     def finish_regeneration(self, original_clip_id: int, candidate_id: int, reframe_mode: str) -> int:
         original = self._require(original_clip_id)
+        job_id = self.repos.jobs.job_id_for_clip(original_clip_id)
         try:
             new_id = self.pipeline.regenerate_framing(
                 candidate_id,
@@ -101,13 +105,17 @@ class ReviewService:
                 reframe_mode,
                 original.buffer_start_seconds,
                 original.buffer_end_seconds,
+                original.trim_origin_seconds,
+                activity_job_id=job_id,
             )
         except Exception as exc:
             self.repos.clips.update_status(original_clip_id, ClipStatus.READY)
-            self.repos.activity.add(f"Framing regeneration failed · {str(exc)[:500]}", "error")
+            self.repos.activity.add(
+                f"Framing regeneration failed · {str(exc)[:500]}", "error", job_id
+            )
             raise
         self.repos.clips.update_status(original_clip_id, ClipStatus.REJECTED)
-        self.repos.activity.add("Regenerated framing is ready for review", "success")
+        self.repos.activity.add("Regenerated framing is ready for review", "success", job_id)
         return new_id
 
     def _require(self, clip_id: int):

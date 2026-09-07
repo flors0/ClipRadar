@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import logging
 import re
+import urllib.request
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from clipradar.app.paths import AppPaths, bundled_binary
+from clipradar.models import OperationCancelled
 
 
 logger = logging.getLogger(__name__)
@@ -144,7 +147,40 @@ class YouTubeClient:
                 duration_seconds=float(entry["duration"]) if entry.get("duration") else None,
                 thumbnail_url=str(thumbnail or ""),
             ))
+        feed_channel_id = channel_id or next(
+            (video.channel_id for video in videos if video.channel_id), ""
+        )
+        if feed_channel_id and any(video.published_at is None for video in videos):
+            feed_times = self._feed_publish_times(feed_channel_id)
+            for video in videos:
+                if video.published_at is None:
+                    video.published_at = feed_times.get(video.video_id)
         return videos
+
+    @staticmethod
+    def _feed_publish_times(channel_id: str) -> dict[str, str]:
+        """Fill metadata omitted by yt-dlp's flat playlist without resolving videos."""
+        request = urllib.request.Request(
+            f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}",
+            headers={"User-Agent": "ClipRadar/0.4"},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                root = ET.fromstring(response.read())
+        except Exception as exc:
+            logger.info("YouTube upload timestamps were unavailable: %s", exc)
+            return {}
+        namespaces = {
+            "atom": "http://www.w3.org/2005/Atom",
+            "yt": "http://www.youtube.com/xml/schemas/2015",
+        }
+        result: dict[str, str] = {}
+        for entry in root.findall("atom:entry", namespaces):
+            video_id = entry.findtext("yt:videoId", default="", namespaces=namespaces)
+            published = entry.findtext("atom:published", default="", namespaces=namespaces)
+            if video_id and published:
+                result[video_id] = published
+        return result
 
     def resolve_video(self, url_or_id: str) -> RemoteVideo:
         value = url_or_id.strip()
@@ -180,10 +216,31 @@ class YouTubeClient:
             heatmap=heatmap,
         )
 
-    def download(self, video: RemoteVideo) -> DownloadedMedia:
+    def download(
+        self,
+        video: RemoteVideo,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        progress_callback: Callable[[float], None] | None = None,
+    ) -> DownloadedMedia:
         target_dir = self.paths.downloads / video.video_id
         target_dir.mkdir(parents=True, exist_ok=True)
         out_template = str(target_dir / f"{video.video_id}.%(ext)s")
+        last_reported = -1.0
+
+        def progress_hook(payload: dict[str, Any]) -> None:
+            nonlocal last_reported
+            if cancel_requested and cancel_requested():
+                raise OperationCancelled("Analysis cancelled by user.")
+            if not progress_callback or payload.get("status") != "downloading":
+                return
+            total = payload.get("total_bytes") or payload.get("total_bytes_estimate") or 0
+            downloaded = payload.get("downloaded_bytes") or 0
+            fraction = max(0.0, min(1.0, float(downloaded) / float(total))) if total else 0.0
+            if fraction >= 1.0 or fraction - last_reported >= 0.01:
+                last_reported = fraction
+                progress_callback(fraction)
+
         options = self._quiet_options() | {
             "format": "bv*[height<=1080]+ba/b[height<=1080]/best",
             "merge_output_format": "mp4",
@@ -192,16 +249,22 @@ class YouTubeClient:
             "continuedl": True,
             "writeinfojson": True,
             "ffmpeg_location": str(Path(bundled_binary("ffmpeg")).parent),
+            "progress_hooks": [progress_hook],
         }
         download_url = f"https://www.youtube.com/watch?v={video.video_id}"
+        if cancel_requested and cancel_requested():
+            self._cleanup_partials(target_dir)
+            raise OperationCancelled("Analysis cancelled by user.")
         try:
             with self._ydl(options) as ydl:
                 info = ydl.extract_info(download_url, download=True)
         except Exception as exc:
+            if cancel_requested and cancel_requested():
+                self._cleanup_partials(target_dir)
+                raise OperationCancelled("Analysis cancelled by user.") from exc
             if "403" not in str(exc):
                 raise YouTubeError(f"The source video could not be downloaded: {exc}") from exc
-            for partial in (*target_dir.glob("*.part"), *target_dir.glob("*.ytdl")):
-                partial.unlink(missing_ok=True)
+            self._cleanup_partials(target_dir)
             direct_options = options | {
                 "format": (
                     "bv*[height<=1080][protocol^=http]+ba[protocol^=http]/"
@@ -212,9 +275,18 @@ class YouTubeClient:
                 with self._ydl(direct_options) as ydl:
                     info = ydl.extract_info(download_url, download=True)
             except Exception as retry_exc:
+                if cancel_requested and cancel_requested():
+                    self._cleanup_partials(target_dir)
+                    raise OperationCancelled("Analysis cancelled by user.") from retry_exc
                 raise YouTubeError(
                     f"The source video could not be downloaded after a direct-stream retry: {retry_exc}"
                 ) from retry_exc
+
+        if progress_callback:
+            progress_callback(1.0)
+        if cancel_requested and cancel_requested():
+            self._cleanup_partials(target_dir)
+            raise OperationCancelled("Analysis cancelled by user.")
 
         video_files = [path for path in target_dir.glob(f"{video.video_id}.*") if path.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}]
         if not video_files:
@@ -231,6 +303,11 @@ class YouTubeClient:
             info_path=info_path,
             duration_seconds=float(info.get("duration") or video.duration_seconds or 0),
         )
+
+    @staticmethod
+    def _cleanup_partials(target_dir: Path) -> None:
+        for partial in (*target_dir.glob("*.part"), *target_dir.glob("*.ytdl")):
+            partial.unlink(missing_ok=True)
 
     def _download_captions_best_effort(
         self,

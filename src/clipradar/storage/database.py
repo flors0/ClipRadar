@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 SCHEMA = """
@@ -55,6 +55,8 @@ CREATE TABLE IF NOT EXISTS analysis_jobs (
     stage TEXT NOT NULL,
     scheduled_at TEXT NOT NULL,
     manual INTEGER NOT NULL DEFAULT 0,
+    approved INTEGER NOT NULL DEFAULT 1,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
     attempts INTEGER NOT NULL DEFAULT 0,
     progress REAL NOT NULL DEFAULT 0,
     error TEXT,
@@ -107,7 +109,8 @@ CREATE TABLE IF NOT EXISTS rendered_clips (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     buffer_start_seconds REAL,
-    buffer_end_seconds REAL
+    buffer_end_seconds REAL,
+    trim_origin_seconds REAL
 );
 
 CREATE INDEX IF NOT EXISTS idx_clips_status ON rendered_clips(status, created_at DESC);
@@ -253,6 +256,36 @@ class Database:
                        )
                    WHERE status = 'Ready' AND buffer_start_seconds IS NULL"""
             )
+        if version < 5:
+            job_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(analysis_jobs)")
+            }
+            if "approved" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE analysis_jobs ADD COLUMN approved INTEGER NOT NULL DEFAULT 1"
+                )
+                connection.execute(
+                    """UPDATE analysis_jobs SET approved = 0
+                       WHERE manual = 0 AND status IN
+                       ('Waiting', 'Scheduled', 'Downloading', 'Analyzing', 'Rendering')"""
+                )
+            if "cancel_requested" not in job_columns:
+                connection.execute(
+                    "ALTER TABLE analysis_jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+                )
+            clip_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(rendered_clips)")
+            }
+            if "trim_origin_seconds" not in clip_columns:
+                connection.execute("ALTER TABLE rendered_clips ADD COLUMN trim_origin_seconds REAL")
+                connection.execute(
+                    """UPDATE rendered_clips
+                       SET trim_origin_seconds = (
+                           SELECT COALESCE(x.refined_start_seconds, x.start_seconds)
+                           FROM clip_candidates x WHERE x.id = rendered_clips.candidate_id
+                       )
+                       WHERE trim_origin_seconds IS NULL"""
+                )
         connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     @contextmanager

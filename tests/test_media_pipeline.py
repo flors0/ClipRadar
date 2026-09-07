@@ -7,7 +7,14 @@ import pytest
 from clipradar.ai.gemini import EvaluationResult, FramingResult, GeminiError
 from clipradar.analysis.candidates import CandidateDetector
 from clipradar.media.ffmpeg import probe_media
-from clipradar.models import Channel, ClipCandidate, ClipStatus, SourceVideo, utc_now
+from clipradar.models import (
+    Channel,
+    ClipCandidate,
+    ClipStatus,
+    OperationCancelled,
+    SourceVideo,
+    utc_now,
+)
 from clipradar.rendering.renderer import ClipRenderer
 from clipradar.settings.models import AISettings, ClipSettings
 
@@ -291,6 +298,7 @@ def test_review_trim_uses_buffer_then_approve_keeps_only_final_cut(
 
     assert saved.buffer_start_seconds == pytest.approx(0)
     assert saved.buffer_end_seconds == pytest.approx(18)
+    assert saved.trim_origin_seconds == pytest.approx(5)
     services.review.update_trim(int(saved.id), 6.25, 15.0)
     services.review.approve(int(saved.id))
 
@@ -299,11 +307,43 @@ def test_review_trim_uses_buffer_then_approve_keeps_only_final_cut(
     assert finalized.status == ClipStatus.APPROVED
     assert finalized.buffer_start_seconds is None
     assert finalized.buffer_end_seconds is None
+    assert finalized.trim_origin_seconds is None
     assert 8.2 <= finalized.duration_seconds <= 9.3
     assert updated_candidate.render_start == pytest.approx(6.25)
     assert updated_candidate.render_end == pytest.approx(15.0)
     assert Path(finalized.file_path).is_file()
     assert not buffered_path.exists()
+
+
+def test_renderer_honours_cancellation_before_writing_output(
+    services,
+    synthetic_video: Path,
+):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_CANCEL_RENDER", "Cancel Render", "", "https://youtube.test/cancel-render"
+    ))
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "cancel-render-video",
+        "Cancel render source",
+        "https://youtube.test/watch?v=cancel-render",
+        duration_seconds=18,
+        local_path=str(synthetic_video),
+    ))
+    candidate = services.repositories.candidates.replace_for_video(int(source.id), [
+        ClipCandidate(None, int(source.id), 5, 13, 90, {})
+    ])[0]
+
+    with pytest.raises(OperationCancelled):
+        services.pipeline.renderer.render(
+            source,
+            candidate,
+            ClipSettings(render_width=360, render_height=640, captions_enabled=False),
+            cancel_requested=lambda: True,
+        )
+
+    assert not list(services.paths.output.rglob("*.mp4"))
 
 
 def test_valid_zero_clip_result_explains_why_nothing_reached_review(

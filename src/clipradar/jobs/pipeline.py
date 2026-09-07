@@ -10,7 +10,7 @@ from clipradar.ai.gemini import GEMINI_MAX_ATTEMPTS, GeminiClient, GeminiError
 from clipradar.analysis.candidates import CandidateDetector
 from clipradar.app.paths import AppPaths
 from clipradar.media.ffmpeg import create_candidate_preview, create_framing_preview, probe_media
-from clipradar.models import AnalysisJob, ClipCandidate, JobStatus, SourceVideo
+from clipradar.models import AnalysisJob, ClipCandidate, JobStatus, OperationCancelled, SourceVideo
 from clipradar.rendering.renderer import ClipRenderer
 from clipradar.settings.models import YOUTUBE_CATEGORY_NAMES
 from clipradar.settings.service import SettingsService
@@ -47,13 +47,27 @@ class AnalysisPipeline:
         progress = progress or (lambda _stage, _value: None)
         job = self._require_job(job_id)
         source = self._require_video(job.source_video_id)
+        created_clips: list[tuple[int, Path]] = []
+        cancelled = lambda: self.repos.jobs.is_cancel_requested(job.id)
         try:
+            self._check_cancel(job.id)
             self.repos.activity.add(
                 f"Analysis attempt {job.attempts + 1} started · {source.title}", "info", job.id
             )
             self._set(job, JobStatus.DOWNLOADING, "Preparing source video", 0.05, progress, increment=True)
             cached_source = bool(source.local_path and Path(source.local_path).is_file())
-            source, info_path = self._ensure_download(source)
+            source, info_path = self._ensure_download(
+                source,
+                cancel_requested=cancelled,
+                download_progress=lambda value: self._set(
+                    job,
+                    JobStatus.DOWNLOADING,
+                    f"Downloading source video · {round(value * 100)}%",
+                    0.05 + value * 0.15,
+                    progress,
+                ),
+            )
+            self._check_cancel(job.id)
             self.repos.activity.add(
                 "Source video ready · existing download reused"
                 if cached_source else "Source video downloaded and verified",
@@ -73,6 +87,7 @@ class AnalysisPipeline:
                 maximum_duration=clip_settings.maximum_duration,
                 max_candidates=clip_settings.max_candidates_per_video,
             )
+            self._check_cancel(job.id)
             candidates = self.repos.candidates.replace_for_video(int(source.id), candidates)
             if not candidates:
                 raise RuntimeError("No usable clip candidates were found.")
@@ -103,6 +118,7 @@ class AnalysisPipeline:
                 job.id,
             )
             for index, candidate in enumerate(candidates):
+                self._check_cancel(job.id)
                 if len(ranked) >= max_outputs:
                     break
                 per_attempt_reserve = self._conservative_request_reserve(candidate, ai_settings.model)
@@ -115,7 +131,13 @@ class AnalysisPipeline:
                 fraction = 0.32 + 0.33 * (index / max(1, len(candidates)))
                 self._set(job, JobStatus.ANALYZING, f"Gemini ranking candidate {index + 1}/{len(candidates)}", fraction, progress)
                 preview = self.paths.candidates / f"{source.youtube_video_id}_{candidate.id}.mp4"
-                create_candidate_preview(source.local_path, preview, candidate.start_seconds, candidate.end_seconds)
+                create_candidate_preview(
+                    source.local_path,
+                    preview,
+                    candidate.start_seconds,
+                    candidate.end_seconds,
+                    cancel_requested=cancelled,
+                )
                 # Reserve both possible structured-output attempts before the first paid call.
                 # Unused reserve is reconciled immediately after the response.
                 self.repos.usage.add(estimated_cost_eur=reserve)
@@ -163,6 +185,7 @@ class AnalysisPipeline:
                     output_tokens=result.output_tokens,
                     estimated_cost_eur=result.estimated_cost_eur - reserve,
                 )
+                self._check_cancel(job.id)
                 self.repos.candidates.apply_ai_result(
                     int(candidate.id), result.score, result.reason, result.refined_start, result.refined_end,
                     title=result.title,
@@ -241,6 +264,7 @@ class AnalysisPipeline:
             )
             rendered = 0
             for index, candidate in enumerate(ranked[:max_outputs]):
+                self._check_cancel(job.id)
                 candidate = self._verify_initial_framing(
                     source,
                     candidate,
@@ -248,7 +272,9 @@ class AnalysisPipeline:
                     job.id,
                     key,
                     ai_settings,
+                    cancelled,
                 )
+                self._check_cancel(job.id)
                 self.repos.activity.add(
                     f"Rendering clip {index + 1}/{len(ranked[:max_outputs])} · "
                     f"{candidate.render_start:.1f}s–{candidate.render_end:.1f}s · "
@@ -265,8 +291,15 @@ class AnalysisPipeline:
                     candidate,
                     clip_settings,
                     output_override=self.settings.storage().output_directory,
+                    cancel_requested=cancelled,
                 )
-                self.repos.clips.add(clip)
+                try:
+                    saved_clip = self.repos.clips.add(clip)
+                except Exception:
+                    Path(clip.file_path).unlink(missing_ok=True)
+                    Path(clip.file_path).with_suffix(".ass").unlink(missing_ok=True)
+                    raise
+                created_clips.append((int(saved_clip.id), Path(saved_clip.file_path)))
                 self.repos.candidates.mark_rendered(int(candidate.id))
                 rendered += 1
             if rendered:
@@ -280,7 +313,14 @@ class AnalysisPipeline:
             self._set(job, JobStatus.READY, stage, 1.0, progress)
             self.repos.activity.add(stage, "success" if rendered else "info", job.id)
             return rendered
+        except OperationCancelled:
+            self._cleanup_created_clips(created_clips)
+            self.repos.jobs.mark_cancelled(job.id)
+            self.repos.activity.add("Analysis cancelled by user", "warning", job.id)
+            progress("Cancelled", job.progress)
+            raise
         except Exception as exc:
+            self._cleanup_created_clips(created_clips)
             safe_error = str(exc)[:700]
             self.repos.jobs.update(job.id, JobStatus.FAILED, "Failed", job.progress, safe_error)
             self.repos.activity.add(f"Analysis failed · {safe_error}", "error", job.id)
@@ -309,6 +349,9 @@ class AnalysisPipeline:
         requested_mode: str,
         buffer_start_seconds: float | None = None,
         buffer_end_seconds: float | None = None,
+        trim_origin_seconds: float | None = None,
+        *,
+        activity_job_id: str | None = None,
     ) -> int:
         """Use Gemini to repair framing while leaving clip selection and metadata untouched."""
         candidate = self.repos.candidates.get(candidate_id)
@@ -335,7 +378,8 @@ class AnalysisPipeline:
         original_preview = self.paths.candidates / f"reframe_{candidate_id}_original.mp4"
         current_preview = self.paths.candidates / f"reframe_{candidate_id}_current.mp4"
         self.repos.activity.add(
-            f"Framing regeneration started · mode {requested_mode} · model {ai_settings.model}"
+            f"Framing regeneration started · mode {requested_mode} · model {ai_settings.model}",
+            job_id=activity_job_id,
         )
         try:
             create_candidate_preview(
@@ -368,7 +412,9 @@ class AnalysisPipeline:
                     requested_mode=requested_mode,
                     candidate=candidate,
                     temperature=ai_settings.temperature,
-                    event_callback=lambda message, level: self.repos.activity.add(message, level),
+                    event_callback=lambda message, level: self.repos.activity.add(
+                        message, level, activity_job_id
+                    ),
                 )
             except GeminiError as exc:
                 unknown_requests = max(0, exc.request_count - exc.responses_with_usage)
@@ -416,6 +462,9 @@ class AnalysisPipeline:
                     proposal,
                     clip_settings,
                     output_override=self.settings.storage().output_directory,
+                    trim_origin_seconds=trim_origin_seconds,
+                    buffer_start_override=buffer_start_seconds,
+                    buffer_end_override=buffer_end_seconds,
                 )
             else:
                 rendered = self.renderer.render(
@@ -447,6 +496,7 @@ class AnalysisPipeline:
             f"focus {result.focus_x:.3f},{result.focus_y:.3f} · {result.request_count} Gemini "
             f"request{'s' if result.request_count != 1 else ''} · {result.reason}",
             "success",
+            activity_job_id,
         )
         return int(saved.id)
 
@@ -482,6 +532,7 @@ class AnalysisPipeline:
         self.repos.activity.add(
             f"Final trim rendered · {candidate.render_start:.1f}s–{candidate.render_end:.1f}s",
             "success",
+            self.repos.jobs.job_id_for_clip(clip_id),
         )
 
     def _verify_initial_framing(
@@ -492,6 +543,7 @@ class AnalysisPipeline:
         job_id: str,
         api_key: str,
         ai_settings,
+        cancel_requested: Callable[[], bool],
     ) -> ClipCandidate:
         """Compare one draft render with the source before it reaches Review."""
         if candidate.reframe_mode not in {"gaming_split", "focus"}:
@@ -515,6 +567,7 @@ class AnalysisPipeline:
                 original_preview,
                 candidate.render_start,
                 candidate.render_end,
+                cancel_requested=cancel_requested,
             )
             preview_settings = replace(
                 clip_settings,
@@ -528,9 +581,16 @@ class AnalysisPipeline:
                 candidate,
                 preview_settings,
                 output_override=str(self.paths.candidates),
+                cancel_requested=cancel_requested,
             )
             draft_path = Path(draft.file_path)
-            create_framing_preview(draft_path, current_preview, 0, draft.duration_seconds)
+            create_framing_preview(
+                draft_path,
+                current_preview,
+                0,
+                draft.duration_seconds,
+                cancel_requested=cancel_requested,
+            )
             self.repos.usage.add(estimated_cost_eur=reserve)
             reserve_recorded = True
             try:
@@ -564,6 +624,8 @@ class AnalysisPipeline:
                 estimated_cost_eur=result.estimated_cost_eur - reserve,
             )
             reserve_recorded = False
+            if cancel_requested():
+                raise OperationCancelled("Analysis cancelled by user.")
             proposal = replace(
                 candidate,
                 reframe_mode=result.reframe_mode,
@@ -589,6 +651,10 @@ class AnalysisPipeline:
                 job_id,
             )
             return proposal
+        except OperationCancelled:
+            if reserve_recorded:
+                self.repos.usage.add(estimated_cost_eur=-reserve)
+            raise
         except Exception as exc:
             if reserve_recorded:
                 self.repos.usage.add(estimated_cost_eur=-reserve)
@@ -646,19 +712,43 @@ class AnalysisPipeline:
             if (info.width, info.height) != expected:
                 raise RuntimeError("The regenerated clip failed resolution validation. The existing clip was kept.")
 
-    def _ensure_download(self, source: SourceVideo) -> tuple[SourceVideo, Path | None]:
+    def _ensure_download(
+        self,
+        source: SourceVideo,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        download_progress: Callable[[float], None] | None = None,
+    ) -> tuple[SourceVideo, Path | None]:
+        if cancel_requested and cancel_requested():
+            raise OperationCancelled("Analysis cancelled by user.")
         if source.local_path and Path(source.local_path).exists():
-            probe_media(source.local_path)
+            probe_media(source.local_path, cancel_requested=cancel_requested)
             info_files = list(Path(source.local_path).parent.glob("*.info.json"))
             return source, info_files[0] if info_files else None
         remote = self.youtube.resolve_video(source.url)
-        downloaded = self.youtube.download(remote)
+        if cancel_requested and cancel_requested():
+            raise OperationCancelled("Analysis cancelled by user.")
+        downloaded = self.youtube.download(
+            remote,
+            cancel_requested=cancel_requested,
+            progress_callback=download_progress,
+        )
         self.repos.videos.set_media(
             int(source.id), str(downloaded.video_path),
             str(downloaded.transcript_path) if downloaded.transcript_path else None,
             downloaded.duration_seconds,
         )
         return self._require_video(int(source.id)), downloaded.info_path
+
+    def _check_cancel(self, job_id: str) -> None:
+        if self.repos.jobs.is_cancel_requested(job_id):
+            raise OperationCancelled("Analysis cancelled by user.")
+
+    def _cleanup_created_clips(self, clips: list[tuple[int, Path]]) -> None:
+        for clip_id, path in clips:
+            path.unlink(missing_ok=True)
+            path.with_suffix(".ass").unlink(missing_ok=True)
+            self.repos.clips.delete(clip_id)
 
     def _clip_settings_for(self, source: SourceVideo):
         clip_settings = self.settings.clips()

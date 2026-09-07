@@ -8,6 +8,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from clipradar.app.services import AppServices
+from clipradar.models import OperationCancelled
 
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,7 @@ class BackgroundCoordinator(QObject):
     task_succeeded = Signal(str, object)
     task_failed = Signal(str, str)
     data_changed = Signal()
-    job_progress = Signal(str, float)
+    job_progress = Signal(str, str, float)
 
     def __init__(self, services: AppServices, parent: QObject | None = None):
         super().__init__(parent)
@@ -74,23 +75,33 @@ class BackgroundCoordinator(QObject):
             if job:
                 self.execute(
                     "pipeline",
-                    lambda: self.services.pipeline.run(job.id, self._emit_progress),
+                    lambda job=job: self.services.pipeline.run(
+                        job.id,
+                        lambda stage, value: self._emit_progress(job.id, stage, value),
+                    ),
                 )
         if "publishing" not in self.running:
             publish_job = self.services.repositories.publish.next_queued()
             if publish_job:
                 self.execute(
                     "publishing",
-                    lambda: self.services.publishing.upload(publish_job.id, self._emit_progress),
+                    lambda publish_job=publish_job: self.services.publishing.upload(
+                        publish_job.id,
+                        lambda stage, value: self._emit_progress(
+                            f"publish:{publish_job.id}", stage, value
+                        ),
+                    ),
                 )
 
-    def _emit_progress(self, stage: str, value: float) -> None:
-        self.job_progress.emit(stage, value)
+    def _emit_progress(self, job_id: str, stage: str, value: float) -> None:
+        self.job_progress.emit(job_id, stage, value)
 
     def _finish(self, key: str, future: Future[Any]) -> None:
         self.running.discard(key)
         try:
             result = future.result()
+        except OperationCancelled:
+            self.task_succeeded.emit(key, None)
         except Exception as exc:
             logger.warning("Background task %s failed: %s", key, exc)
             self.task_failed.emit(key, str(exc))

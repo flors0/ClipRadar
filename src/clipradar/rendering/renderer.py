@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from clipradar.app.paths import AppPaths, bundled_binary
 from clipradar.media.ffmpeg import MediaError, probe_media, run_process
@@ -23,6 +24,7 @@ class ClipRenderer:
         settings: ClipSettings,
         *,
         output_override: str = "",
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> RenderedClip:
         return self._render_window(
             source,
@@ -31,6 +33,7 @@ class ClipRenderer:
             candidate.render_start,
             candidate.render_end,
             output_override=output_override,
+            cancel_requested=cancel_requested,
         )
 
     def render_review_buffer(
@@ -40,13 +43,28 @@ class ClipRenderer:
         settings: ClipSettings,
         *,
         padding_seconds: float = 30.0,
+        trim_origin_seconds: float | None = None,
+        buffer_start_override: float | None = None,
+        buffer_end_override: float | None = None,
         output_override: str = "",
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> RenderedClip:
         if not source.local_path or not Path(source.local_path).exists():
             raise MediaError("The downloaded source video is missing.")
-        source_duration = float(source.duration_seconds or probe_media(source.local_path).duration)
-        buffer_start = max(0.0, candidate.render_start - max(0.0, padding_seconds))
-        buffer_end = min(source_duration, candidate.render_end + max(0.0, padding_seconds))
+        source_duration = float(
+            source.duration_seconds
+            or probe_media(source.local_path, cancel_requested=cancel_requested).duration
+        )
+        buffer_start = (
+            max(0.0, float(buffer_start_override))
+            if buffer_start_override is not None
+            else max(0.0, candidate.render_start - max(0.0, padding_seconds))
+        )
+        buffer_end = (
+            min(source_duration, float(buffer_end_override))
+            if buffer_end_override is not None
+            else min(source_duration, candidate.render_end + max(0.0, padding_seconds))
+        )
         return self._render_window(
             source,
             candidate,
@@ -56,6 +74,10 @@ class ClipRenderer:
             output_override=output_override,
             buffer_start_seconds=buffer_start,
             buffer_end_seconds=buffer_end,
+            trim_origin_seconds=(
+                candidate.render_start if trim_origin_seconds is None else trim_origin_seconds
+            ),
+            cancel_requested=cancel_requested,
         )
 
     def _render_window(
@@ -69,13 +91,15 @@ class ClipRenderer:
         output_override: str = "",
         buffer_start_seconds: float | None = None,
         buffer_end_seconds: float | None = None,
+        trim_origin_seconds: float | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> RenderedClip:
         if not source.local_path or not Path(source.local_path).exists():
             raise MediaError("The downloaded source video is missing.")
         duration = end - start
         if duration <= 0:
             raise MediaError("Candidate boundaries are invalid.")
-        media = probe_media(source.local_path)
+        media = probe_media(source.local_path, cancel_requested=cancel_requested)
         output_root = Path(output_override).expanduser() if output_override else self.paths.output
         output_dir = output_root / _safe_name(source.youtube_video_id)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -117,8 +141,18 @@ class ClipRenderer:
             "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
             "-movflags", "+faststart", str(output),
         ]
-        run_process(command, timeout=max(180, duration * 12))
-        actual = probe_media(output)
+        try:
+            run_process(
+                command,
+                timeout=max(180, duration * 12),
+                cancel_requested=cancel_requested,
+            )
+            actual = probe_media(output, cancel_requested=cancel_requested)
+        except Exception:
+            output.unlink(missing_ok=True)
+            if ass_path:
+                ass_path.unlink(missing_ok=True)
+            raise
         return RenderedClip(
             id=None,
             candidate_id=int(candidate.id),
@@ -128,6 +162,7 @@ class ClipRenderer:
             format=settings.output_format,
             buffer_start_seconds=buffer_start_seconds,
             buffer_end_seconds=buffer_end_seconds,
+            trim_origin_seconds=trim_origin_seconds,
         )
 
     @staticmethod

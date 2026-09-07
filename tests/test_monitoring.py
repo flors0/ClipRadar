@@ -40,6 +40,12 @@ def test_add_uses_baseline_then_monitoring_queues_only_new_uploads(services):
     assert result.videos_discovered == 2
     assert result.jobs_scheduled == 2
     assert services.repositories.channels.get(int(channel.id)).last_video_id == "v3"
+    assert services.repositories.jobs.pending_approval_count() == 2
+    assert services.repositories.jobs.next_due() is None
+
+    first_detected = services.repositories.jobs.pending_approval_jobs()[0]
+    channels.start_job(first_detected.id)
+    assert services.repositories.jobs.next_due().id == first_detected.id
 
 
 def test_manual_latest_is_queued_immediately(services):
@@ -90,8 +96,8 @@ def test_analysis_queue_has_deterministic_sequential_positions(services):
         None, int(channel.id), "queue-second", "Second queued video", "https://youtube.test/second"
     ))
     scheduled = utc_now()
-    first = services.repositories.jobs.create(int(first_source.id), scheduled)
-    second = services.repositories.jobs.create(int(second_source.id), scheduled)
+    first = services.repositories.jobs.create(int(first_source.id), scheduled, manual=True)
+    second = services.repositories.jobs.create(int(second_source.id), scheduled, manual=True)
 
     assert services.repositories.jobs.queue_position(first.id) == 1
     assert services.repositories.jobs.queue_position(second.id) == 2
