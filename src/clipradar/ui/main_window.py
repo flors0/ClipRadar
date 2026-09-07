@@ -100,7 +100,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.5.0")
+        version = QLabel("v0.5.1")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)

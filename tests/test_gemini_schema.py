@@ -51,6 +51,26 @@ def test_gemini_prompt_requests_editable_metadata_tags_and_scene_focus():
     assert "explicitly classified this source video as Gaming" in prompt
 
 
+def test_gemini_prompt_keeps_clip_selection_separate_from_framing_guidance():
+    candidate = ClipCandidate(None, 1, 10, 45, 88, {})
+    prompt = GeminiClient._prompt(
+        candidate,
+        20,
+        60,
+        "Auto",
+        "Auto",
+        "Gaming",
+        "Keep the facecam above the gameplay.",
+        "Prefer decisive outplays; avoid routine farming.",
+    )
+
+    assert "CLIP SELECTION INSTRUCTIONS" in prompt
+    assert "Prefer decisive outplays" in prompt
+    assert "Lower the score" in prompt
+    assert "FRAMING GUIDANCE" in prompt
+    assert "Keep the facecam" in prompt
+
+
 class _FakeModels:
     def __init__(self, responses):
         self.responses = list(responses)

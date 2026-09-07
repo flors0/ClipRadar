@@ -70,6 +70,8 @@ def normalize_youtube_input(value: str) -> str:
 class YouTubeClient:
     def __init__(self, paths: AppPaths):
         self.paths = paths
+        self._metadata_cache: dict[str, RemoteVideo] = {}
+        self._metadata_failures: set[str] = set()
 
     @staticmethod
     def _ydl(options: dict[str, Any]):
@@ -157,14 +159,45 @@ class YouTubeClient:
             for video in videos:
                 if video.published_at is None:
                     video.published_at = feed_times.get(video.video_id)
+        self._fill_missing_metadata(videos)
         return videos
+
+    def _fill_missing_metadata(self, videos: list[RemoteVideo]) -> None:
+        """Resolve only entries still missing dates after the flat playlist and Atom feed."""
+        consecutive_failures = 0
+        for video in videos:
+            if video.published_at is not None:
+                continue
+            cached = self._metadata_cache.get(video.video_id)
+            if cached:
+                self._merge_video_metadata(video, cached)
+                continue
+            if video.video_id in self._metadata_failures or consecutive_failures >= 3:
+                continue
+            try:
+                resolved = self.resolve_video(video.url)
+            except YouTubeError as exc:
+                self._metadata_failures.add(video.video_id)
+                consecutive_failures += 1
+                logger.info("Detailed metadata for %s was unavailable: %s", video.video_id, exc)
+                continue
+            consecutive_failures = 0
+            self._metadata_cache[video.video_id] = resolved
+            self._merge_video_metadata(video, resolved)
+
+    @staticmethod
+    def _merge_video_metadata(target: RemoteVideo, resolved: RemoteVideo) -> None:
+        target.published_at = target.published_at or resolved.published_at
+        target.duration_seconds = target.duration_seconds or resolved.duration_seconds
+        target.thumbnail_url = target.thumbnail_url or resolved.thumbnail_url
+        target.view_count = target.view_count if target.view_count is not None else resolved.view_count
 
     @staticmethod
     def _feed_publish_times(channel_id: str) -> dict[str, str]:
         """Fill metadata omitted by yt-dlp's flat playlist without resolving videos."""
         request = urllib.request.Request(
             f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}",
-            headers={"User-Agent": "ClipRadar/0.5"},
+            headers={"User-Agent": "ClipRadar/0.5.1"},
         )
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
@@ -196,8 +229,7 @@ class YouTubeClient:
             raise YouTubeError(f"The video could not be resolved: {exc}") from exc
         if info.get("live_status") in {"is_live", "is_upcoming"}:
             raise YouTubeError("Live and upcoming videos cannot be analyzed yet.")
-        timestamp = info.get("timestamp") or info.get("release_timestamp")
-        published = datetime.fromtimestamp(timestamp, timezone.utc).isoformat() if timestamp else None
+        published = _published_at(info)
         thumbnails = info.get("thumbnails") or []
         heatmap = [
             {
@@ -377,12 +409,13 @@ def _published_at(entry: dict[str, Any]) -> str | None:
     timestamp = entry.get("timestamp") or entry.get("release_timestamp")
     if timestamp:
         return datetime.fromtimestamp(float(timestamp), timezone.utc).isoformat()
-    upload_date = str(entry.get("upload_date") or "")
-    if len(upload_date) == 8 and upload_date.isdigit():
-        try:
-            return datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
-        except ValueError:
-            pass
+    for key in ("upload_date", "release_date"):
+        upload_date = str(entry.get(key) or "")
+        if len(upload_date) == 8 and upload_date.isdigit():
+            try:
+                return datetime.strptime(upload_date, "%Y%m%d").replace(tzinfo=timezone.utc).isoformat()
+            except ValueError:
+                pass
     return None
 
 

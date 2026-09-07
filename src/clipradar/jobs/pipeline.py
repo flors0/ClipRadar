@@ -170,6 +170,7 @@ class AnalysisPipeline:
                             metadata_language=publishing_settings.metadata_language,
                             content_category=YOUTUBE_CATEGORY_NAMES.get(source.category_id or ""),
                             framing_guidance=self._framing_guidance(source.channel_id),
+                            selection_guidance=self._clip_selection_guidance(source.channel_id),
                             event_callback=lambda message, level: self.repos.activity.add(
                                 f"Candidate {index + 1}/{len(candidates)} · {message}", level, job.id
                             ),
@@ -726,6 +727,7 @@ class AnalysisPipeline:
             hud_y=candidate.hud_y,
             hud_width=candidate.hud_width,
             hud_height=candidate.hud_height,
+            output_regions=candidate.output_regions,
         )
 
     def detect_framing_profile(self, profile: FramingProfile) -> FramingProfile:
@@ -893,6 +895,11 @@ class AnalysisPipeline:
                     "hud_x", "hud_y", "hud_width", "hud_height",
                 )
             }
+            changes["output_regions"] = (
+                dict(profile.output_regions)
+                if profile.output_regions
+                else dict(candidate.output_regions)
+            )
             return replace(candidate, reframe_mode=profile.mode, **changes)
         if force and profile.mode == "focus":
             gameplay = (
@@ -917,6 +924,10 @@ class AnalysisPipeline:
             profiles = [item for item in profiles if item.mode == mode]
         return "\n\n".join(self._profile_guidance(item) for item in profiles)
 
+    def _clip_selection_guidance(self, channel_id: int) -> str:
+        channel = self.repos.channels.get(channel_id)
+        return channel.clip_selection_instructions.strip() if channel else ""
+
     @staticmethod
     def _profile_guidance(profile: FramingProfile) -> str:
         labels = {"gaming_split": "Facecam + gameplay", "focus": "Important subject"}
@@ -932,6 +943,19 @@ class AnalysisPipeline:
                 lines.append(f"- {label}: x={x}, y={y}, width={width}, height={height}")
         if profile.instructions:
             lines.append(f"User instructions: {profile.instructions}")
+        if profile.output_regions:
+            lines.append("Saved portrait output slots:")
+            for key, label in (
+                ("gameplay", "main content"),
+                ("facecam", "facecam"),
+                ("hud", "HUD/stats"),
+            ):
+                values = profile.output_regions.get(key)
+                if values:
+                    x, y, width, height = (round(float(value) * 1000) for value in values)
+                    lines.append(
+                        f"- {label}: x={x}, y={y}, width={width}, height={height} in the 9:16 output"
+                    )
         if profile.mode == "focus":
             lines.append(
                 "The important subject remains dynamic per clip; use these regions only as context and choose "

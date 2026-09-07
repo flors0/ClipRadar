@@ -67,6 +67,7 @@ class Channel:
     min_duration_seconds: int = 20
     target_duration_seconds: int = 38
     max_duration_seconds: int = 60
+    clip_selection_instructions: str = ""
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
 
@@ -89,6 +90,7 @@ class FramingProfile:
     hud_y: float | None = None
     hud_width: float | None = None
     hud_height: float | None = None
+    output_regions: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)
     reference_source_video_id: int | None = None
     reference_seconds: float | None = None
     updated_at: str = field(default_factory=utc_now)
@@ -158,6 +160,7 @@ class ClipCandidate:
     hud_y: float | None = None
     hud_width: float | None = None
     hud_height: float | None = None
+    output_regions: dict[str, tuple[float, float, float, float]] = field(default_factory=dict)
 
     @property
     def render_start(self) -> float:

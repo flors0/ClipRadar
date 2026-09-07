@@ -2,8 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QMouseEvent, QPixmap, QResizeEvent
+from PySide6.QtCore import QPointF, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import (
+    QDesktopServices,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+    QResizeEvent,
+    QTextLayout,
+    QTextOption,
+)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QApplication,
@@ -49,10 +57,8 @@ class VideoCard(QFrame):
         self.thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.thumbnail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.thumbnail)
-        self.title = QLabel(video.title)
+        self.title = TwoLineElidedLabel(video.title)
         self.title.setObjectName("VideoCardTitle")
-        self.title.setWordWrap(True)
-        self.title.setFixedHeight(self.title.fontMetrics().lineSpacing() * 2 + 4)
         self.title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.title)
         metadata = muted_label(_video_metadata(video))
@@ -126,6 +132,58 @@ class ThumbnailLabel(QLabel):
         self.setPixmap(scaled.copy(left, top, self.width(), self.height()))
 
 
+class TwoLineElidedLabel(QLabel):
+    """Paint a true two-line title and elide overflow instead of clipping it."""
+
+    def __init__(self, text: str, parent: QWidget | None = None):
+        super().__init__(text, parent)
+        self.setToolTip(text)
+        self.setFixedHeight(self.fontMetrics().lineSpacing() * 2 + 3)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        painter.setPen(self.palette().windowText().color())
+        width = max(1.0, float(self.contentsRect().width()))
+        layout = QTextLayout(self.text(), self.font())
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        lines = []
+        layout.beginLayout()
+        y = 0.0
+        for _ in range(2):
+            line = layout.createLine()
+            if not line.isValid():
+                break
+            line.setLineWidth(width)
+            line.setPosition(QPointF(0.0, y))
+            y += line.height()
+            lines.append(line)
+        layout.endLayout()
+        for index, line in enumerate(lines):
+            is_last = index == len(lines) - 1
+            has_overflow = line.textStart() + line.textLength() < len(self.text())
+            if is_last and has_overflow:
+                remaining = self.text()[line.textStart():].strip()
+                elided = self.fontMetrics().elidedText(
+                    remaining,
+                    Qt.TextElideMode.ElideRight,
+                    round(width),
+                )
+                painter.drawText(
+                    0,
+                    round(line.y()),
+                    round(width),
+                    round(line.height()),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    elided,
+                )
+            else:
+                line.draw(painter, QPointF())
+
+
 class VideoDashboardPage(QWidget):
     load_requested = Signal(int)
     analyze_requested = Signal(int, str, str)
@@ -153,8 +211,10 @@ class VideoDashboardPage(QWidget):
         row = QHBoxLayout()
         heading = QVBoxLayout()
         heading.setSpacing(3)
-        heading.addWidget(title_label("Channel videos"))
-        heading.addWidget(muted_label("Browse recent uploads without downloading them."))
+        self.channel_name = title_label("Channel videos")
+        heading.addWidget(self.channel_name)
+        self.channel_summary = muted_label("Browse recent uploads without downloading them.")
+        heading.addWidget(self.channel_summary)
         row.addLayout(heading)
         row.addStretch(1)
         row.addWidget(muted_label("Channel"))
@@ -183,9 +243,9 @@ class VideoDashboardPage(QWidget):
         self.container.setMaximumWidth(1240)
         self.grid = QGridLayout(self.container)
         self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setHorizontalSpacing(16)
-        self.grid.setVerticalSpacing(26)
-        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+        self.grid.setHorizontalSpacing(14)
+        self.grid.setVerticalSpacing(22)
+        self.grid.setAlignment(Qt.AlignmentFlag.AlignTop)
         for column in range(3):
             self.grid.setColumnStretch(column, 1)
         self.scroll.setWidget(self.container)
@@ -209,10 +269,13 @@ class VideoDashboardPage(QWidget):
         self.reload.setEnabled(bool(channels) and self.loading_channel_id is None)
         self.channel_filter.blockSignals(False)
         if not channels:
+            self.channel_name.setText("Channel videos")
+            self.channel_summary.setText("Add a channel to browse its latest uploads.")
             self.status.setText("Add a channel under Channels first")
             self._render([])
         elif self.selected_channel_id in self.cache:
             self._render(self.cache[self.selected_channel_id])
+        self._update_channel_identity()
 
     def request_current(self, *, force: bool = False) -> None:
         channel_id = self.channel_filter.currentData()
@@ -252,6 +315,7 @@ class VideoDashboardPage(QWidget):
             review_channel_id=current.review_channel_id,
             dashboard_channel_id=self.selected_channel_id,
         ))
+        self._update_channel_identity()
         self.request_current()
 
     def _render(self, videos: list[RemoteVideo]) -> None:
@@ -269,15 +333,19 @@ class VideoDashboardPage(QWidget):
                     int(channel_id), url, title
                 )
             )
-            self.grid.addWidget(
-                card,
-                index // 3,
-                index % 3,
-                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter,
-            )
+            self.grid.addWidget(card, index // 3, index % 3)
             if video.thumbnail_url:
                 self._load_thumbnail(video.thumbnail_url, card.thumbnail)
         self.status.setText(f"{len(videos)} recent video{'s' if len(videos) != 1 else ''}")
+
+    def _update_channel_identity(self) -> None:
+        channel_id = self.channel_filter.currentData()
+        channel = self.channels.get(int(channel_id)) if channel_id is not None else None
+        if not channel:
+            return
+        self.channel_name.setText(channel.name)
+        self.channel_summary.setText("Latest channel uploads · open on YouTube or right-click to analyze")
+        self.feed_title.setText(f"{channel.name} videos")
 
     def _analyze(self, channel_id: int, url: str, title: str) -> None:
         dialog = AnalyzeVideoDialog(

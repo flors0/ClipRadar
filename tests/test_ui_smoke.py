@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QLineEdi
 from clipradar.app.coordinator import BackgroundCoordinator
 from clipradar.models import Channel, ClipCandidate, JobStatus, RenderedClip, SourceVideo, utc_now
 from clipradar.ui.main_window import MainWindow
+from clipradar.ui.framing_widgets import LiveFramingPreview
 from clipradar.ui.pages.channels import ChannelCard
 from clipradar.ui.pages.video_dashboard import VideoCard, _format_views, _relative_upload_time
 from clipradar.ui.timeline import ClickableSlider, TrimRangeSlider
@@ -115,6 +116,7 @@ def test_dashboard_renders_metadata_cards_and_analyze_uses_genre_dialog(qtbot, s
     assert cards[0].objectName() == "VideoTile"
     assert window.dashboard.grid.columnCount() == 3
     assert window.dashboard.container.maximumWidth() == 1240
+    assert window.dashboard.grid.horizontalSpacing() == 14
     assert window.dashboard.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     metadata = cards[0].findChild(QLabel, "VideoMetadata")
     assert metadata is not None
@@ -197,15 +199,55 @@ def test_framing_setup_opens_from_review_and_saves_channel_profile(
     assert window.page_title.text() == "Framing Setup"
     assert window.framing_setup.canvas.pixmap is not None
     window.framing_setup.canvas.regions["facecam"] = QRectF(0.08, 0.04, 0.20, 0.24)
+    window.framing_setup.live_preview.output_regions["facecam"] = QRectF(0.0, 0.0, 0.42, 0.27)
+    window.framing_setup.selection_instructions.setPlainText(
+        "Prefer decisive plays with a clear reaction."
+    )
     window.framing_setup.instructions.setPlainText("Keep the compact stats beside the facecam.")
     window.framing_setup._save()
     saved = services.repositories.framing_profiles.get(int(channel.id), "gaming_split")
     assert saved is not None
     assert saved.facecam_x == 0.08
+    assert saved.output_regions["facecam"] == (0.0, 0.0, 0.42, 0.27)
     assert "compact stats" in saved.instructions
+    assert services.repositories.channels.get(int(channel.id)).clip_selection_instructions.startswith(
+        "Prefer decisive plays"
+    )
 
     window.framing_setup.back.click()
     assert window.page_title.text() == "Review"
+
+
+def test_live_portrait_layout_boxes_are_independently_moveable(qtbot):
+    preview = LiveFramingPreview()
+    preview.resize(320, 568)
+    preview.update_plan(
+        None,
+        {
+            "gameplay": QRectF(0.0, 0.0, 1.0, 1.0),
+            "facecam": QRectF(0.02, 0.04, 0.18, 0.24),
+            "hud": QRectF(0.76, 0.08, 0.20, 0.24),
+        },
+        "gaming_split",
+        {
+            "facecam": QRectF(0.0, 0.0, 0.45, 0.28),
+            "hud": QRectF(0.45, 0.0, 0.55, 0.28),
+            "gameplay": QRectF(0.0, 0.28, 1.0, 0.72),
+        },
+    )
+    qtbot.addWidget(preview)
+    preview.show()
+    preview.select_region("facecam", create=False)
+    changed = []
+    preview.regions_changed.connect(lambda: changed.append(True))
+
+    QTest.mousePress(preview, Qt.MouseButton.LeftButton, pos=QPoint(60, 70))
+    QTest.mouseMove(preview, QPoint(90, 90), delay=10)
+    QTest.mouseRelease(preview, Qt.MouseButton.LeftButton, pos=QPoint(90, 90))
+
+    assert changed
+    assert preview.output_regions["facecam"].x() > 0
+    assert preview.output_regions["hud"] == QRectF(0.45, 0.0, 0.55, 0.28)
 
 
 def test_dashboard_activity_log_is_selectable_and_copyable(qtbot, services):

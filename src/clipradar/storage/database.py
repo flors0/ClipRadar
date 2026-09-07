@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 SCHEMA = """
@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS channels (
     min_duration_seconds INTEGER NOT NULL DEFAULT 20,
     target_duration_seconds INTEGER NOT NULL DEFAULT 38,
     max_duration_seconds INTEGER NOT NULL DEFAULT 60,
+    clip_selection_instructions TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS framing_profiles (
     hud_y REAL,
     hud_width REAL,
     hud_height REAL,
+    output_layout_json TEXT NOT NULL DEFAULT '{}',
     reference_source_video_id INTEGER REFERENCES source_videos(id) ON DELETE SET NULL,
     reference_seconds REAL,
     updated_at TEXT NOT NULL,
@@ -118,7 +120,8 @@ CREATE TABLE IF NOT EXISTS clip_candidates (
     hud_x REAL,
     hud_y REAL,
     hud_width REAL,
-    hud_height REAL
+    hud_height REAL,
+    output_layout_json TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE TABLE IF NOT EXISTS rendered_clips (
@@ -325,6 +328,23 @@ class Database:
                        UNIQUE(channel_id, mode)
                    )"""
             )
+        if version < 7:
+            channel_columns = {
+                row["name"] for row in connection.execute("PRAGMA table_info(channels)")
+            }
+            if "clip_selection_instructions" not in channel_columns:
+                connection.execute(
+                    "ALTER TABLE channels ADD COLUMN clip_selection_instructions "
+                    "TEXT NOT NULL DEFAULT ''"
+                )
+            for table in ("framing_profiles", "clip_candidates"):
+                columns = {
+                    row["name"] for row in connection.execute(f"PRAGMA table_info({table})")
+                }
+                if "output_layout_json" not in columns:
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN output_layout_json TEXT NOT NULL DEFAULT '{{}}'"
+                    )
         connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     @contextmanager

@@ -86,8 +86,9 @@ def test_version_one_database_migrates_metadata_publishing_and_disables_captions
             connection.execute("SELECT value_json FROM settings WHERE key = 'clips'").fetchone()["value_json"]
         )
         tables = {row["name"] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert version == 6
+    assert version == 7
     assert {"ai_title", "ai_tags_json", "reframe_mode", "focus_x", "facecam_x"} <= columns
+    assert "output_layout_json" in columns
     assert {"framing_profiles", "youtube_accounts", "publish_jobs"} <= tables
     assert settings["captions_enabled"] is False
     assert settings["word_highlighting"] is False
@@ -110,7 +111,7 @@ def test_version_two_database_adds_source_video_category(tmp_path):
         version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(source_videos)")}
 
-    assert version == 6
+    assert version == 7
     assert "category_id" in columns
 
 
@@ -170,7 +171,7 @@ def test_version_three_database_adds_review_buffers_and_semantic_regions(tmp_pat
             "SELECT buffer_start_seconds, buffer_end_seconds FROM rendered_clips WHERE id = 1"
         ).fetchone()
 
-    assert version == 6
+    assert version == 7
     assert {"gameplay_x", "gameplay_height", "hud_x", "hud_height"} <= candidate_columns
     assert {"buffer_start_seconds", "buffer_end_seconds"} <= clip_columns
     assert migrated["buffer_start_seconds"] == 12
@@ -250,7 +251,7 @@ def test_version_four_database_requires_approval_for_legacy_automatic_jobs(tmp_p
         ).fetchone()
         version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
 
-    assert version == 6
+    assert version == 7
     assert jobs["automatic"]["approved"] == 0
     assert jobs["manual"]["approved"] == 1
     assert jobs["automatic"]["cancel_requested"] == 0
@@ -280,7 +281,12 @@ def test_analysis_job_can_be_started_and_cancelled_before_work(services):
 
 def test_channel_framing_profile_survives_restart(services):
     channel = services.repositories.channels.add(Channel(
-        None, "UC_PROFILE", "Profile Channel", "", "https://youtube.test/profile"
+        None,
+        "UC_PROFILE",
+        "Profile Channel",
+        "",
+        "https://youtube.test/profile",
+        clip_selection_instructions="Prefer decisive outplays with a payoff.",
     ))
     saved = services.repositories.framing_profiles.save(FramingProfile(
         None,
@@ -299,6 +305,11 @@ def test_channel_framing_profile_survives_restart(services):
         hud_y=0.08,
         hud_width=0.18,
         hud_height=0.22,
+        output_regions={
+            "facecam": (0.0, 0.0, 0.45, 0.28),
+            "hud": (0.45, 0.0, 0.55, 0.28),
+            "gameplay": (0.0, 0.28, 1.0, 0.72),
+        },
     ))
 
     restarted = type(services).create(services.paths, services.settings.secrets)
@@ -309,6 +320,43 @@ def test_channel_framing_profile_survives_restart(services):
     assert loaded.instructions == "Keep the scoreboard next to the facecam."
     assert loaded.facecam_x == 0.03
     assert loaded.hud_width == 0.18
+    assert loaded.output_regions["hud"] == (0.45, 0.0, 0.55, 0.28)
+    assert restarted.repositories.channels.get(int(channel.id)).clip_selection_instructions.startswith(
+        "Prefer decisive"
+    )
+
+
+def test_version_six_database_adds_selection_and_output_layout_storage(tmp_path):
+    path = tmp_path / "version-six.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_info (version INTEGER NOT NULL);
+            INSERT INTO schema_info(version) VALUES (6);
+            CREATE TABLE channels (id INTEGER PRIMARY KEY);
+            CREATE TABLE framing_profiles (id INTEGER PRIMARY KEY);
+            CREATE TABLE clip_candidates (id INTEGER PRIMARY KEY);
+            """
+        )
+
+    database = Database(path)
+    database.initialize()
+    with database.connection() as connection:
+        version = connection.execute("SELECT version FROM schema_info").fetchone()["version"]
+        channel_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(channels)")
+        }
+        profile_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(framing_profiles)")
+        }
+        candidate_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(clip_candidates)")
+        }
+
+    assert version == 7
+    assert "clip_selection_instructions" in channel_columns
+    assert "output_layout_json" in profile_columns
+    assert "output_layout_json" in candidate_columns
 
 
 def test_logging_filter_redacts_google_tokens():
