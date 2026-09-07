@@ -188,6 +188,7 @@ class ReviewPage(QWidget):
     regenerate_requested = Signal(int, str)
     publish_requested = Signal(int, dict)
     trim_requested = Signal(int, float, float)
+    framing_setup_requested = Signal(int)
 
     def __init__(
         self,
@@ -320,6 +321,12 @@ class ReviewPage(QWidget):
         for label, value in REFRAME_OPTIONS:
             self.reframe.addItem(label, value)
         edit_row.addWidget(self.reframe, 1)
+        self.framing_setup = QPushButton("Framing setup…")
+        self.framing_setup.setToolTip(
+            "Create a reusable Facecam, gameplay, and HUD layout for this channel."
+        )
+        self.framing_setup.clicked.connect(self._emit_framing_setup)
+        edit_row.addWidget(self.framing_setup)
         self.regenerate = QPushButton("Regenerate framing")
         self.regenerate.setToolTip(
             "Gemini compares the original segment with this render and creates a new framing plan."
@@ -503,7 +510,7 @@ class ReviewPage(QWidget):
         self.open_source.setEnabled(has_record)
         self.open_file.setEnabled(has_file)
         self.delete_clip.setEnabled(can_decide)
-        for button in (self.regenerate, self.approve, self.play):
+        for button in (self.framing_setup, self.regenerate, self.approve, self.play):
             button.setEnabled(can_decide and has_file)
         has_account = bool(self.publishing.repos.youtube_accounts.list_all())
         self.publish.setEnabled(can_decide and has_file and has_account)
@@ -527,6 +534,11 @@ class ReviewPage(QWidget):
         if self.current:
             self.player.pause()
             self.regenerate_requested.emit(int(self.current["id"]), str(self.reframe.currentData()))
+
+    def _emit_framing_setup(self) -> None:
+        if self.current:
+            self.player.pause()
+            self.framing_setup_requested.emit(int(self.current["id"]))
 
     def _show_context_menu(self, point) -> None:
         item = self.list.itemAt(point)

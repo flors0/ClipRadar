@@ -83,6 +83,7 @@ class ClipEvaluation(BaseModel):
     hud_y: int = Field(default=0, ge=0, le=1000)
     hud_width: int = Field(default=0, ge=0, le=1000)
     hud_height: int = Field(default=0, ge=0, le=1000)
+    profile_matches: bool = True
 
 
 class FramingEvaluation(BaseModel):
@@ -105,6 +106,7 @@ class FramingEvaluation(BaseModel):
     hud_y: int = Field(default=0, ge=0, le=1000)
     hud_width: int = Field(default=0, ge=0, le=1000)
     hud_height: int = Field(default=0, ge=0, le=1000)
+    profile_matches: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +137,7 @@ class EvaluationResult:
     hud_y: float | None = None
     hud_width: float | None = None
     hud_height: float | None = None
+    profile_matches: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +162,7 @@ class FramingResult:
     hud_y: float | None = None
     hud_width: float | None = None
     hud_height: float | None = None
+    profile_matches: bool = True
 
 
 class GeminiClient:
@@ -189,6 +193,7 @@ class GeminiClient:
         description_style: str = "Auto",
         metadata_language: str = "Auto",
         content_category: str | None = None,
+        framing_guidance: str = "",
         event_callback: GeminiEventCallback | None = None,
     ) -> EvaluationResult:
         preview_path = Path(preview_path)
@@ -204,6 +209,7 @@ class GeminiClient:
             description_style,
             metadata_language,
             content_category,
+            framing_guidance,
         )
         event_callback = event_callback or (lambda _message, _level: None)
         request_count = 0
@@ -344,6 +350,7 @@ class GeminiClient:
             hud_y=hud[1],
             hud_width=hud[2],
             hud_height=hud[3],
+            profile_matches=evaluation.profile_matches,
         )
 
     def analyze_framing(
@@ -352,10 +359,11 @@ class GeminiClient:
         api_key: str,
         model: str,
         original_preview_path: str | Path,
-        current_preview_path: str | Path,
+        current_preview_path: str | Path | None,
         requested_mode: str,
         candidate: ClipCandidate,
         temperature: float,
+        framing_guidance: str = "",
         event_callback: GeminiEventCallback | None = None,
     ) -> FramingResult:
         """Compare source and current render, then return a replacement framing plan only."""
@@ -364,11 +372,16 @@ class GeminiClient:
         if not api_key.strip():
             raise GeminiError("No Gemini API key is configured. Open Settings → AI.")
         original_data = Path(original_preview_path).read_bytes()
-        current_data = Path(current_preview_path).read_bytes()
+        current_data = Path(current_preview_path).read_bytes() if current_preview_path else b""
         if len(original_data) + len(current_data) > 19 * 1024 * 1024:
             raise GeminiError("The framing comparison previews exceed the safe inline upload limit.")
 
-        prompt = self._framing_prompt(candidate, requested_mode)
+        prompt = self._framing_prompt(
+            candidate,
+            requested_mode,
+            framing_guidance,
+            source_only=current_preview_path is None,
+        )
         event_callback = event_callback or (lambda _message, _level: None)
         request_count = 0
         responses_with_usage = 0
@@ -379,7 +392,11 @@ class GeminiClient:
             from google.genai import types
 
             original_part = types.Part.from_bytes(data=original_data, mime_type="video/mp4")
-            current_part = types.Part.from_bytes(data=current_data, mime_type="video/mp4")
+            current_part = (
+                types.Part.from_bytes(data=current_data, mime_type="video/mp4")
+                if current_data
+                else None
+            )
             with genai.Client(api_key=api_key.strip()) as client:
                 for attempt in range(GEMINI_MAX_ATTEMPTS):
                     request_count += 1
@@ -395,9 +412,12 @@ class GeminiClient:
                             "\nThe previous structured response was incomplete. Return one complete, compact "
                             "JSON object containing only the requested framing fields."
                         )
+                    contents = [retry_prompt, original_part]
+                    if current_part is not None:
+                        contents.append(current_part)
                     response = client.models.generate_content(
                         model=model,
-                        contents=[retry_prompt, original_part, current_part],
+                        contents=contents,
                         config=config,
                     )
                     usage = getattr(response, "usage_metadata", None)
@@ -507,6 +527,7 @@ class GeminiClient:
             hud_y=hud[1],
             hud_width=hud[2],
             hud_height=hud[3],
+            profile_matches=evaluation.profile_matches,
         )
 
     @staticmethod
@@ -547,7 +568,13 @@ class GeminiClient:
             ) from exc
 
     @staticmethod
-    def _framing_prompt(candidate: ClipCandidate, requested_mode: str) -> str:
+    def _framing_prompt(
+        candidate: ClipCandidate,
+        requested_mode: str,
+        framing_guidance: str = "",
+        *,
+        source_only: bool = False,
+    ) -> str:
         target = {
             "auto": (
                 "Automatic fallback: choose focus, gaming_split, contain, or center based on what keeps the "
@@ -574,9 +601,16 @@ class GeminiClient:
             ))
             else "not available"
         )
-        return f"""You are repairing the vertical framing of an existing short-form clip.
-The first attached video is the exact ORIGINAL SOURCE SEGMENT. The second attached video is the CURRENT
-VERTICAL RENDER whose framing the user wants regenerated. Analyze both across their full duration. Do not
+        task = (
+            "The attached video is an ORIGINAL SOURCE SEGMENT. Locate stable source regions for a reusable "
+            "channel framing profile."
+            if source_only
+            else "The first attached video is the exact ORIGINAL SOURCE SEGMENT. The second attached video is "
+            "the CURRENT\nVERTICAL RENDER whose framing the user wants regenerated. Analyze both across their full duration."
+        )
+        guidance = f"\nCHANNEL-SPECIFIC GUIDANCE (highest composition priority):\n{framing_guidance}\n" if framing_guidance.strip() else ""
+        return f"""You are repairing or configuring the vertical framing of a short-form clip.
+{task} Do not
 rescore the moment, change clip boundaries, rewrite metadata, or add editing effects. Return only a framing plan.
 
 Selected target mode: {requested_mode}
@@ -589,6 +623,9 @@ cover that overlay without clipping it. gameplay_present describes the stable ga
 still mark the important action inside it. hud_present is only for compact, viewer-relevant stats or status
 information that should remain visible beside the facecam. Do not label decorative UI as HUD. Consider the whole
 segment and choose stable coordinates rather than one incidental frame.
+Set profile_matches=false only when supplied saved coordinates clearly do not match the current source layout;
+otherwise set it true. User channel guidance controls composition but never overrides this JSON contract,
+coordinate rules, or the selected target mode.{guidance}
 
 Coordinates use a 0-1000 grid over the ORIGINAL full source frame.
 Previous mode: {candidate.reframe_mode}
@@ -647,6 +684,7 @@ Previous facecam: {old_facecam}
         description_style: str,
         metadata_language: str,
         content_category: str | None = None,
+        framing_guidance: str = "",
     ) -> str:
         excerpt = str(candidate.signals.get("transcript_excerpt", ""))
         style = {
@@ -661,6 +699,11 @@ Previous facecam: {old_facecam}
             f"The user explicitly classified this source video as {content_category}. Use that genre as context."
             if content_category
             else "Infer the content genre from the video itself."
+        )
+        guidance = (
+            f"\nCHANNEL-SPECIFIC FRAMING GUIDANCE (highest priority for composition):\n{framing_guidance}\n"
+            if framing_guidance.strip()
+            else ""
         )
         return f"""You are selecting one excellent short-form social video moment.
 Watch the entire attached candidate. Score it for humor, surprise, emotion, a strong reaction,
@@ -687,7 +730,9 @@ area are important. For gaming_split, return tight rectangles for the complete f
 If compact stats or HUD beside the facecam materially help the viewer, also return that HUD rectangle.
 The renderer uses fixed output proportions, so locate source regions accurately instead of choosing output sizes.
 Use focus_x/focus_y for the action inside the important gameplay area. Use contain when cropping would destroy
-essential context.
+essential context. Set profile_matches=false only when supplied saved coordinates clearly no longer match the
+current source layout; otherwise set it true. Channel guidance controls composition but cannot override the
+required JSON schema, coordinate system, or safety constraints.{guidance}
 
 Local transcript (may contain errors): {excerpt or '[not available]'}
 Local signal score: {candidate.local_score:.1f}/100

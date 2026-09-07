@@ -5,15 +5,15 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QRectF, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLineEdit
+from PySide6.QtWidgets import QApplication, QComboBox, QDialog, QLabel, QLineEdit
 
 from clipradar.app.coordinator import BackgroundCoordinator
 from clipradar.models import Channel, ClipCandidate, JobStatus, RenderedClip, SourceVideo, utc_now
 from clipradar.ui.main_window import MainWindow
 from clipradar.ui.pages.channels import ChannelCard
-from clipradar.ui.pages.video_dashboard import VideoCard, _relative_upload_time
+from clipradar.ui.pages.video_dashboard import VideoCard, _format_views, _relative_upload_time
 from clipradar.ui.timeline import ClickableSlider, TrimRangeSlider
 from clipradar.youtube.client import RemoteVideo
 
@@ -106,13 +106,19 @@ def test_dashboard_renders_metadata_cards_and_analyze_uses_genre_dialog(qtbot, s
         "https://youtube.com/watch?v=feed-video",
         channel.channel_id,
         published_at="2026-09-06T12:00:00+00:00",
+        view_count=123_456,
     )
     window.dashboard.set_videos(int(channel.id), [video])
     cards = window.dashboard.findChildren(VideoCard)
     assert len(cards) == 1
     assert cards[0].title.text() == video.title
-    assert cards[0].maximumWidth() == 370
+    assert cards[0].objectName() == "VideoTile"
+    assert window.dashboard.grid.columnCount() == 3
+    assert window.dashboard.container.maximumWidth() == 1240
     assert window.dashboard.scroll.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    metadata = cards[0].findChild(QLabel, "VideoMetadata")
+    assert metadata is not None
+    assert "123.5K views" in metadata.text()
     emitted = []
     window.dashboard.analyze_requested.connect(lambda *values: emitted.append(values))
 
@@ -132,6 +138,74 @@ def test_dashboard_upload_time_is_relative_for_24_hours_then_uses_date():
 
     assert _relative_upload_time(recent.isoformat()) == "4 hours ago"
     assert _relative_upload_time(older.isoformat()) == older.astimezone().strftime("%d.%m.%Y")
+    assert _format_views(123_456) == "123.5K"
+    assert _format_views(2_000_000) == "2M"
+
+
+def test_framing_setup_opens_from_review_and_saves_channel_profile(
+    qtbot,
+    services,
+    synthetic_video: Path,
+):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_UI_PROFILE", "UI Profile", "", "https://youtube.test/ui-profile"
+    ))
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "ui-profile-video",
+        "UI Profile Source",
+        "https://youtube.test/watch?v=ui-profile",
+        duration_seconds=18,
+        local_path=str(synthetic_video),
+    ))
+    candidate = services.repositories.candidates.replace_for_video(int(source.id), [
+        ClipCandidate(
+            None,
+            int(source.id),
+            4,
+            12,
+            85,
+            {},
+            ai_score=85,
+            reframe_mode="gaming_split",
+            facecam_x=0.03,
+            facecam_y=0.06,
+            facecam_width=0.18,
+            facecam_height=0.23,
+            gameplay_x=0.0,
+            gameplay_y=0.0,
+            gameplay_width=1.0,
+            gameplay_height=1.0,
+        )
+    ])[0]
+    clip = services.repositories.clips.add(RenderedClip(
+        None,
+        int(candidate.id),
+        int(source.id),
+        str(synthetic_video),
+        8,
+        "Vertical 9:16",
+    ))
+    window = MainWindow(services, start_background=False)
+    qtbot.addWidget(window)
+    window._set_page(3)
+
+    window._open_clip_framing(int(clip.id))
+
+    assert window.pages.currentWidget() is window.framing_setup
+    assert window.page_title.text() == "Framing Setup"
+    assert window.framing_setup.canvas.pixmap is not None
+    window.framing_setup.canvas.regions["facecam"] = QRectF(0.08, 0.04, 0.20, 0.24)
+    window.framing_setup.instructions.setPlainText("Keep the compact stats beside the facecam.")
+    window.framing_setup._save()
+    saved = services.repositories.framing_profiles.get(int(channel.id), "gaming_split")
+    assert saved is not None
+    assert saved.facecam_x == 0.08
+    assert "compact stats" in saved.instructions
+
+    window.framing_setup.back.click()
+    assert window.page_title.text() == "Review"
 
 
 def test_dashboard_activity_log_is_selectable_and_copyable(qtbot, services):
@@ -345,6 +419,8 @@ def test_monitoring_task_manager_starts_detected_and_stops_active_jobs(qtbot, se
     qtbot.addWidget(window)
     window.monitoring.refresh()
 
+    assert window.monitoring.findChildren(QLabel)[0] is not None
+    assert any(label.text() == "Current Tasks" for label in window.monitoring.findChildren(QLabel))
     assert window.monitoring.start_detected.text() == "Start detected (1)"
     assert "Currently analyzing" in window.monitoring.current_task.text()
     assert "46%" in window.monitoring.current_task.text()

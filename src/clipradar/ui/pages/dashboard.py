@@ -96,7 +96,7 @@ class MonitoringPage(QWidget):
 
         tasks_card, tasks_layout = card_layout()
         task_header = QHBoxLayout()
-        task_header.addWidget(title_label("Analysis tasks"))
+        task_header.addWidget(title_label("Current Tasks"))
         task_header.addStretch(1)
         self.current_task = muted_label("No active analysis")
         task_header.addWidget(self.current_task)
@@ -179,11 +179,12 @@ class MonitoringPage(QWidget):
         }
         active = next((job for job in jobs if job["status"] in active_statuses), None)
         if active:
+            state = "Stopping" if active.get("cancel_requested") else "Active"
             self.current_task.setText(
-                f"Active · {active['video_title']} · {round(float(active['progress']) * 100)}%"
+                f"{state} · {active['video_title']} · {round(float(active['progress']) * 100)}%"
             )
         else:
-            self.current_task.setText("No active analysis")
+            self.current_task.setText("No active task")
         if not jobs:
             self.task_layout.addWidget(muted_label("No analysis tasks yet."))
             return
@@ -237,7 +238,7 @@ class MonitoringPage(QWidget):
                 button.setText("Stopping")
                 button.setEnabled(False)
             else:
-                button.setText(status)
+                button.setText("Stopped" if status == JobStatus.CANCELLED.value else status)
                 button.setEnabled(False)
             layout.addWidget(button)
             self.task_layout.addWidget(row)

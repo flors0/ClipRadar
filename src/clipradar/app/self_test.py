@@ -44,7 +44,7 @@ def run_self_test() -> int:
             }
         required = {
             "channels", "source_videos", "analysis_jobs", "clip_candidates", "rendered_clips",
-            "youtube_accounts", "publish_jobs", "settings", "ai_usage",
+            "framing_profiles", "youtube_accounts", "publish_jobs", "settings", "ai_usage",
         }
         assert required <= tables
         assert {"approved", "cancel_requested"} <= job_columns

@@ -11,6 +11,7 @@ from clipradar.models import (
     Channel,
     ClipCandidate,
     ClipStatus,
+    FramingProfile,
     JobStatus,
     PublishJob,
     PublishStatus,
@@ -30,6 +31,10 @@ def _channel(row: Any) -> Channel:
 
 def _video(row: Any) -> SourceVideo:
     return SourceVideo(**dict(row))
+
+
+def _framing_profile(row: Any) -> FramingProfile:
+    return FramingProfile(**dict(row))
 
 
 def _job(row: Any) -> AnalysisJob:
@@ -197,12 +202,105 @@ class VideoRepository:
             ).fetchone()
         return _video(row) if row else None
 
+    def latest_local_for_channel(self, channel_id: int) -> SourceVideo | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                """SELECT * FROM source_videos
+                   WHERE channel_id = ? AND local_path IS NOT NULL
+                   ORDER BY discovered_at DESC LIMIT 1""",
+                (channel_id,),
+            ).fetchone()
+        return _video(row) if row else None
+
     def set_media(self, video_id: int, local_path: str, transcript_path: str | None, duration: float) -> None:
         with self.db.connection() as connection:
             connection.execute(
                 "UPDATE source_videos SET local_path = ?, transcript_path = ?, duration_seconds = ? WHERE id = ?",
                 (local_path, transcript_path, duration, video_id),
             )
+
+
+class FramingProfileRepository:
+    MODES = {"gaming_split", "focus"}
+
+    def __init__(self, database: Database):
+        self.db = database
+
+    def get(self, channel_id: int, mode: str) -> FramingProfile | None:
+        with self.db.connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM framing_profiles WHERE channel_id = ? AND mode = ?",
+                (channel_id, mode),
+            ).fetchone()
+        return _framing_profile(row) if row else None
+
+    def list_for_channel(self, channel_id: int) -> list[FramingProfile]:
+        with self.db.connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM framing_profiles WHERE channel_id = ? ORDER BY mode",
+                (channel_id,),
+            ).fetchall()
+        return [_framing_profile(row) for row in rows]
+
+    def save(self, profile: FramingProfile) -> FramingProfile:
+        if profile.mode not in self.MODES:
+            raise ValueError("Framing profiles support Facecam + gameplay or Important subject.")
+        for label, region, minimum in (
+            ("facecam", (profile.facecam_x, profile.facecam_y, profile.facecam_width, profile.facecam_height), 0.03),
+            ("main content", (profile.gameplay_x, profile.gameplay_y, profile.gameplay_width, profile.gameplay_height), 0.04),
+            ("HUD", (profile.hud_x, profile.hud_y, profile.hud_width, profile.hud_height), 0.02),
+        ):
+            _validate_optional_region(label, region, minimum_size=minimum)
+        profile.instructions = profile.instructions.strip()[:4000]
+        profile.updated_at = utc_now()
+        values = asdict(profile)
+        values.pop("id")
+        with self.db.connection() as connection:
+            connection.execute(
+                """INSERT INTO framing_profiles (
+                       channel_id, mode, instructions,
+                       facecam_x, facecam_y, facecam_width, facecam_height,
+                       gameplay_x, gameplay_y, gameplay_width, gameplay_height,
+                       hud_x, hud_y, hud_width, hud_height,
+                       reference_source_video_id, reference_seconds, updated_at
+                   ) VALUES (
+                       :channel_id, :mode, :instructions,
+                       :facecam_x, :facecam_y, :facecam_width, :facecam_height,
+                       :gameplay_x, :gameplay_y, :gameplay_width, :gameplay_height,
+                       :hud_x, :hud_y, :hud_width, :hud_height,
+                       :reference_source_video_id, :reference_seconds, :updated_at
+                   ) ON CONFLICT(channel_id, mode) DO UPDATE SET
+                       instructions = excluded.instructions,
+                       facecam_x = excluded.facecam_x,
+                       facecam_y = excluded.facecam_y,
+                       facecam_width = excluded.facecam_width,
+                       facecam_height = excluded.facecam_height,
+                       gameplay_x = excluded.gameplay_x,
+                       gameplay_y = excluded.gameplay_y,
+                       gameplay_width = excluded.gameplay_width,
+                       gameplay_height = excluded.gameplay_height,
+                       hud_x = excluded.hud_x,
+                       hud_y = excluded.hud_y,
+                       hud_width = excluded.hud_width,
+                       hud_height = excluded.hud_height,
+                       reference_source_video_id = excluded.reference_source_video_id,
+                       reference_seconds = excluded.reference_seconds,
+                       updated_at = excluded.updated_at""",
+                values,
+            )
+            row = connection.execute(
+                "SELECT * FROM framing_profiles WHERE channel_id = ? AND mode = ?",
+                (profile.channel_id, profile.mode),
+            ).fetchone()
+        return _framing_profile(row)
+
+    def delete(self, channel_id: int, mode: str) -> bool:
+        with self.db.connection() as connection:
+            cursor = connection.execute(
+                "DELETE FROM framing_profiles WHERE channel_id = ? AND mode = ?",
+                (channel_id, mode),
+            )
+        return cursor.rowcount == 1
 
 
 class JobRepository:
@@ -321,7 +419,7 @@ class JobRepository:
             status = JobStatus(row["status"])
             if status in {JobStatus.WAITING, JobStatus.SCHEDULED}:
                 connection.execute(
-                    """UPDATE analysis_jobs SET status = ?, stage = 'Cancelled',
+                    """UPDATE analysis_jobs SET status = ?, stage = 'Stopped',
                        cancel_requested = 1, error = NULL, updated_at = ? WHERE id = ?""",
                     (JobStatus.CANCELLED.value, now, job_id),
                 )
@@ -342,12 +440,17 @@ class JobRepository:
             ).fetchone()
         return bool(row and row["cancel_requested"])
 
-    def mark_cancelled(self, job_id: str) -> None:
+    def mark_cancelled(self, job_id: str, completed_clips: int = 0) -> None:
+        stage = (
+            f"Stopped · {completed_clips} completed clip{'s' if completed_clips != 1 else ''} kept"
+            if completed_clips
+            else "Stopped"
+        )
         with self.db.connection() as connection:
             connection.execute(
-                """UPDATE analysis_jobs SET status = ?, stage = 'Cancelled',
+                """UPDATE analysis_jobs SET status = ?, stage = ?,
                    cancel_requested = 1, error = NULL, updated_at = ? WHERE id = ?""",
-                (JobStatus.CANCELLED.value, utc_now(), job_id),
+                (JobStatus.CANCELLED.value, stage, utc_now(), job_id),
             )
 
     def pending_approval_count(self) -> int:
@@ -383,7 +486,7 @@ class JobRepository:
         interrupted = (JobStatus.DOWNLOADING.value, JobStatus.ANALYZING.value, JobStatus.RENDERING.value)
         with self.db.connection() as connection:
             cancelled = connection.execute(
-                """UPDATE analysis_jobs SET status = ?, stage = 'Cancelled', error = NULL,
+                """UPDATE analysis_jobs SET status = ?, stage = 'Stopped', error = NULL,
                    updated_at = ? WHERE status IN (?, ?, ?) AND cancel_requested = 1""",
                 (JobStatus.CANCELLED.value, utc_now(), *interrupted),
             ).rowcount
@@ -935,6 +1038,7 @@ class Repositories:
     def __init__(self, database: Database):
         self.channels = ChannelRepository(database)
         self.videos = VideoRepository(database)
+        self.framing_profiles = FramingProfileRepository(database)
         self.jobs = JobRepository(database)
         self.candidates = CandidateRepository(database)
         self.clips = ClipRepository(database)

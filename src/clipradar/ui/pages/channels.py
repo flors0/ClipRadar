@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -75,6 +76,7 @@ class ChannelCard(QFrame):
     specific_requested = Signal(int, str, str)
     remove_requested = Signal(int)
     update_requested = Signal(int, dict)
+    framing_requested = Signal(int)
 
     def __init__(self, channel: Channel, default_category_id: str, parent: QWidget | None = None):
         super().__init__(parent)
@@ -110,8 +112,15 @@ class ChannelCard(QFrame):
         specific.clicked.connect(self._specific)
         pause = QPushButton("Pause" if channel.monitoring_enabled else "Resume")
         pause.clicked.connect(lambda: self.toggle_requested.emit(int(channel.id), not channel.monitoring_enabled))
-        settings = QPushButton("Settings")
-        settings.clicked.connect(self._settings)
+        settings = QPushButton("Manage")
+        manage_menu = QMenu(settings)
+        channel_settings = manage_menu.addAction("Channel settings…")
+        framing_profile = manage_menu.addAction("Framing profile…")
+        channel_settings.triggered.connect(self._settings)
+        framing_profile.triggered.connect(
+            lambda: self.framing_requested.emit(int(self.channel.id))
+        )
+        settings.setMenu(manage_menu)
         remove = QPushButton("Remove")
         remove.setObjectName("DangerButton")
         remove.clicked.connect(self._remove)
@@ -151,6 +160,7 @@ class ChannelsPage(QWidget):
     specific_requested = Signal(int, str, str)
     remove_requested = Signal(int)
     update_requested = Signal(int, dict)
+    framing_requested = Signal(int)
 
     def __init__(
         self,
@@ -220,5 +230,6 @@ class ChannelsPage(QWidget):
             card.specific_requested.connect(self.specific_requested)
             card.remove_requested.connect(self.remove_requested)
             card.update_requested.connect(self.update_requested)
+            card.framing_requested.connect(self.framing_requested)
             self.cards.addWidget(card)
         self.cards.addStretch(1)
