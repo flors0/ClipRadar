@@ -40,6 +40,7 @@ class RemoteVideo:
     published_at: str | None = None
     duration_seconds: float | None = None
     thumbnail_url: str = ""
+    view_count: int | None = None
     heatmap: list[dict[str, float]] = field(default_factory=list)
 
 
@@ -146,6 +147,7 @@ class YouTubeClient:
                 published_at=published,
                 duration_seconds=float(entry["duration"]) if entry.get("duration") else None,
                 thumbnail_url=str(thumbnail or ""),
+                view_count=_optional_int(entry.get("view_count")),
             ))
         feed_channel_id = channel_id or next(
             (video.channel_id for video in videos if video.channel_id), ""
@@ -162,7 +164,7 @@ class YouTubeClient:
         """Fill metadata omitted by yt-dlp's flat playlist without resolving videos."""
         request = urllib.request.Request(
             f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}",
-            headers={"User-Agent": "ClipRadar/0.4"},
+            headers={"User-Agent": "ClipRadar/0.5"},
         )
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
@@ -213,6 +215,7 @@ class YouTubeClient:
             published_at=published,
             duration_seconds=float(info["duration"]) if info.get("duration") else None,
             thumbnail_url=str(thumbnails[-1].get("url", "") if thumbnails else info.get("thumbnail", "")),
+            view_count=_optional_int(info.get("view_count")),
             heatmap=heatmap,
         )
 
@@ -381,3 +384,10 @@ def _published_at(entry: dict[str, Any]) -> str | None:
         except ValueError:
             pass
     return None
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return max(0, int(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None

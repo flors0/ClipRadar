@@ -23,6 +23,7 @@ from clipradar.app.services import AppServices
 from clipradar.ui.common import muted_label
 from clipradar.ui.pages.channels import ChannelsPage
 from clipradar.ui.pages.dashboard import MonitoringPage
+from clipradar.ui.pages.framing_setup import FramingSetupPage
 from clipradar.ui.pages.publishing import PublishingPage
 from clipradar.ui.pages.review import ReviewPage
 from clipradar.ui.pages.settings import SettingsPage
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self.services = services
         self.coordinator = BackgroundCoordinator(services, self)
         self._connections_ready = False
+        self._framing_return_page = 3
         self.setWindowTitle("ClipRadar")
         self.setWindowIcon(QIcon(str(resource_path("resources/logo.svg"))))
         self.resize(1440, 900)
@@ -98,7 +100,7 @@ class MainWindow(QMainWindow):
         side.addStretch(1)
         self.sidebar_status = muted_label("●  Ready")
         side.addWidget(self.sidebar_status)
-        version = QLabel("v0.4.1")
+        version = QLabel("v0.5.0")
         version.setObjectName("Tiny")
         side.addWidget(version)
         shell.addWidget(sidebar)
@@ -141,6 +143,7 @@ class MainWindow(QMainWindow):
         )
         self.publishing = PublishingPage(self.services.repositories.publish)
         self.settings = SettingsPage(self.services.settings, self.services.paths, self.services.publishing)
+        self.framing_setup = FramingSetupPage(self.services.repositories)
         for page in (
             self.dashboard,
             self.monitoring,
@@ -148,6 +151,7 @@ class MainWindow(QMainWindow):
             self.review,
             self.publishing,
             self.settings,
+            self.framing_setup,
         ):
             self.pages.addWidget(page)
         content_layout.addWidget(self.pages, 1)
@@ -199,12 +203,26 @@ class MainWindow(QMainWindow):
             )
         )
         self.channels.update_requested.connect(self._update_channel)
+        self.channels.framing_requested.connect(self._open_channel_framing)
         self.review.approve_requested.connect(self._approve)
         self.review.reject_requested.connect(self._reject)
         self.review.delete_requested.connect(self._delete_clip)
         self.review.regenerate_requested.connect(self._regenerate)
         self.review.publish_requested.connect(self._publish)
         self.review.trim_requested.connect(self._update_trim)
+        self.review.framing_setup_requested.connect(self._open_clip_framing)
+        self.framing_setup.back_requested.connect(self._close_framing_setup)
+        self.framing_setup.saved.connect(self._toast)
+        self.framing_setup.auto_detect_requested.connect(
+            lambda profile: self._background(
+                "framing_detect", lambda: self.services.pipeline.detect_framing_profile(profile)
+            )
+        )
+        self.framing_setup.test_requested.connect(
+            lambda profile: self._background(
+                "framing_test", lambda: self.services.pipeline.render_framing_profile_preview(profile)
+            )
+        )
         self.publishing.retry_requested.connect(self._retry_publish)
         self.publishing.cancel_requested.connect(self._cancel_publish)
         self.settings.saved.connect(self._toast)
@@ -290,7 +308,8 @@ class MainWindow(QMainWindow):
             self._toast(str(exc), error=True)
             return
         self.refresh_all()
-        self._toast("Stopping analysis…")
+        job = self.services.repositories.jobs.get(job_id)
+        self._toast("Stopped" if job and job.status.value == "Cancelled" else "Stopping analysis…")
 
     def _load_dashboard_videos(self, channel_id: int) -> None:
         self._background(
@@ -308,6 +327,28 @@ class MainWindow(QMainWindow):
             self._toast("Channel settings saved")
         except Exception as exc:
             self._toast(str(exc), error=True)
+
+    def _open_clip_framing(self, clip_id: int) -> None:
+        self._open_framing_workspace(lambda: self.framing_setup.open_from_clip(clip_id))
+
+    def _open_channel_framing(self, channel_id: int) -> None:
+        self._open_framing_workspace(lambda: self.framing_setup.open_for_channel(channel_id))
+
+    def _open_framing_workspace(self, load: Callable[[], None]) -> None:
+        try:
+            load()
+        except Exception as exc:
+            self._toast(str(exc), error=True)
+            return
+        current = self.pages.currentIndex()
+        self._framing_return_page = current if 0 <= current < len(PAGE_INFO) else 3
+        self.pages.setCurrentWidget(self.framing_setup)
+        self.page_title.setText("Framing Setup")
+        self.page_subtitle.setText("Teach ClipRadar a stable channel layout and test it before rendering.")
+
+    def _close_framing_setup(self) -> None:
+        self.framing_setup.player.stop()
+        self._set_page(self._framing_return_page)
 
     def _approve(self, clip_id: int) -> None:
         if self._background(f"approve:{clip_id}", lambda: self.services.review.approve(clip_id)):
@@ -411,6 +452,12 @@ class MainWindow(QMainWindow):
                 self._toast(f"Analysis complete · {result} clip{'s' if result != 1 else ''} ready")
         elif key.startswith("regenerate:"):
             self._toast("New render ready for review")
+        elif key == "framing_detect":
+            self.framing_setup.finish_auto_detect(result)
+            self._toast("Gemini framing proposal ready")
+        elif key == "framing_test":
+            self.framing_setup.finish_test(str(result))
+            self._toast("Framing test render ready")
         elif key.startswith("approve:"):
             self._toast("Final cut rendered and approved")
         elif key.startswith("publish_prepare:"):
@@ -445,6 +492,8 @@ class MainWindow(QMainWindow):
             self.pipeline_progress.hide()
             self.pipeline_text.setText("Last job failed")
             self.sidebar_status.setText("●  Attention needed")
+        elif key in {"framing_detect", "framing_test"}:
+            self.framing_setup.finish_action_error(message)
         elif key == "publishing":
             self.pipeline_progress.hide()
             self.pipeline_text.setText("Last upload failed")

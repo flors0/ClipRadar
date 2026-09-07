@@ -72,6 +72,29 @@ class Channel:
 
 
 @dataclass(slots=True)
+class FramingProfile:
+    id: int | None
+    channel_id: int
+    mode: str
+    instructions: str = ""
+    facecam_x: float | None = None
+    facecam_y: float | None = None
+    facecam_width: float | None = None
+    facecam_height: float | None = None
+    gameplay_x: float | None = None
+    gameplay_y: float | None = None
+    gameplay_width: float | None = None
+    gameplay_height: float | None = None
+    hud_x: float | None = None
+    hud_y: float | None = None
+    hud_width: float | None = None
+    hud_height: float | None = None
+    reference_source_video_id: int | None = None
+    reference_seconds: float | None = None
+    updated_at: str = field(default_factory=utc_now)
+
+
+@dataclass(slots=True)
 class SourceVideo:
     id: int | None
     channel_id: int

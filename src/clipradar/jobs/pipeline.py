@@ -10,7 +10,14 @@ from clipradar.ai.gemini import GEMINI_MAX_ATTEMPTS, GeminiClient, GeminiError
 from clipradar.analysis.candidates import CandidateDetector
 from clipradar.app.paths import AppPaths
 from clipradar.media.ffmpeg import create_candidate_preview, create_framing_preview, probe_media
-from clipradar.models import AnalysisJob, ClipCandidate, JobStatus, OperationCancelled, SourceVideo
+from clipradar.models import (
+    AnalysisJob,
+    ClipCandidate,
+    FramingProfile,
+    JobStatus,
+    OperationCancelled,
+    SourceVideo,
+)
 from clipradar.rendering.renderer import ClipRenderer
 from clipradar.settings.models import YOUTUBE_CATEGORY_NAMES
 from clipradar.settings.service import SettingsService
@@ -162,6 +169,7 @@ class AnalysisPipeline:
                             description_style=publishing_settings.description_style,
                             metadata_language=publishing_settings.metadata_language,
                             content_category=YOUTUBE_CATEGORY_NAMES.get(source.category_id or ""),
+                            framing_guidance=self._framing_guidance(source.channel_id),
                             event_callback=lambda message, level: self.repos.activity.add(
                                 f"Candidate {index + 1}/{len(candidates)} · {message}", level, job.id
                             ),
@@ -229,6 +237,12 @@ class AnalysisPipeline:
                 candidate.hud_y = result.hud_y
                 candidate.hud_width = result.hud_width
                 candidate.hud_height = result.hud_height
+                candidate = self._apply_saved_framing_profile(
+                    source,
+                    candidate,
+                    profile_matches=result.profile_matches,
+                )
+                self._store_framing(int(candidate.id), candidate)
                 evaluated_count += 1
                 meets_threshold = result.score >= ai_settings.minimum_ai_score
                 overlaps = meets_threshold and self._overlaps_selected(candidate, ranked)
@@ -314,10 +328,16 @@ class AnalysisPipeline:
             self.repos.activity.add(stage, "success" if rendered else "info", job.id)
             return rendered
         except OperationCancelled:
-            self._cleanup_created_clips(created_clips)
-            self.repos.jobs.mark_cancelled(job.id)
-            self.repos.activity.add("Analysis cancelled by user", "warning", job.id)
-            progress("Cancelled", job.progress)
+            completed = len(created_clips)
+            self.repos.jobs.mark_cancelled(job.id, completed)
+            message = (
+                f"Stopped by user · {completed} completed clip{'s' if completed != 1 else ''} kept"
+                if completed
+                else "Stopped by user · no completed clips"
+            )
+            self.repos.activity.add(message, "info", job.id)
+            current = self.repos.jobs.get(job.id)
+            progress("Stopped", current.progress if current else job.progress)
             raise
         except Exception as exc:
             self._cleanup_created_clips(created_clips)
@@ -412,6 +432,10 @@ class AnalysisPipeline:
                     requested_mode=requested_mode,
                     candidate=candidate,
                     temperature=ai_settings.temperature,
+                    framing_guidance=self._framing_guidance(
+                        source.channel_id,
+                        requested_mode if requested_mode in {"gaming_split", "focus"} else None,
+                    ),
                     event_callback=lambda message, level: self.repos.activity.add(
                         message, level, activity_job_id
                     ),
@@ -453,6 +477,11 @@ class AnalysisPipeline:
             hud_y=result.hud_y,
             hud_width=result.hud_width,
             hud_height=result.hud_height,
+        )
+        proposal = self._apply_saved_framing_profile(
+            source,
+            proposal,
+            profile_matches=result.profile_matches,
         )
         rendered = None
         try:
@@ -602,6 +631,9 @@ class AnalysisPipeline:
                     requested_mode=candidate.reframe_mode,
                     candidate=candidate,
                     temperature=ai_settings.temperature,
+                    framing_guidance=self._framing_guidance(
+                        source.channel_id, candidate.reframe_mode
+                    ),
                     event_callback=lambda message, level: self.repos.activity.add(
                         f"Initial framing check · {message}", level, job_id
                     ),
@@ -643,6 +675,11 @@ class AnalysisPipeline:
                 hud_y=result.hud_y,
                 hud_width=result.hud_width,
                 hud_height=result.hud_height,
+            )
+            proposal = self._apply_saved_framing_profile(
+                source,
+                proposal,
+                profile_matches=result.profile_matches,
             )
             self._store_framing(int(candidate.id), proposal)
             self.repos.activity.add(
@@ -690,6 +727,219 @@ class AnalysisPipeline:
             hud_width=candidate.hud_width,
             hud_height=candidate.hud_height,
         )
+
+    def detect_framing_profile(self, profile: FramingProfile) -> FramingProfile:
+        """Ask Gemini for source regions without saving the user's draft automatically."""
+        source, candidate = self._profile_source_and_candidate(profile)
+        ai_settings = self.settings.ai()
+        key = self.settings.secrets.get_gemini_key()
+        if not key:
+            raise GeminiError("No Gemini API key is configured. Open Settings → AI.")
+        per_attempt_reserve = self._conservative_request_reserve(candidate, ai_settings.model)
+        reserve = per_attempt_reserve * GEMINI_MAX_ATTEMPTS
+        decision = self.budget.can_send_request(reserve, self.settings.budget())
+        if not decision.allowed:
+            raise RuntimeError(decision.reason.replace("next candidate", "framing auto-detection"))
+        preview = self.paths.candidates / f"profile_{source.id}_{profile.mode}.mp4"
+        try:
+            create_candidate_preview(
+                source.local_path,
+                preview,
+                candidate.start_seconds,
+                candidate.end_seconds,
+            )
+            self.repos.usage.add(estimated_cost_eur=reserve)
+            try:
+                result = self.gemini.analyze_framing(
+                    api_key=key,
+                    model=ai_settings.model,
+                    original_preview_path=preview,
+                    current_preview_path=None,
+                    requested_mode=profile.mode,
+                    candidate=candidate,
+                    temperature=ai_settings.temperature,
+                    framing_guidance=self._profile_guidance(profile),
+                )
+            except GeminiError as exc:
+                unknown_requests = max(0, exc.request_count - exc.responses_with_usage)
+                retained_cost = exc.estimated_cost_eur + per_attempt_reserve * unknown_requests
+                self.repos.usage.add(
+                    requests=exc.request_count,
+                    input_tokens=exc.input_tokens,
+                    output_tokens=exc.output_tokens,
+                    estimated_cost_eur=retained_cost - reserve,
+                )
+                raise
+        finally:
+            preview.unlink(missing_ok=True)
+        self.repos.usage.add(
+            requests=result.request_count,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            estimated_cost_eur=result.estimated_cost_eur - reserve,
+        )
+        proposal = replace(
+            profile,
+            facecam_x=result.facecam_x,
+            facecam_y=result.facecam_y,
+            facecam_width=result.facecam_width,
+            facecam_height=result.facecam_height,
+            gameplay_x=result.gameplay_x,
+            gameplay_y=result.gameplay_y,
+            gameplay_width=result.gameplay_width,
+            gameplay_height=result.gameplay_height,
+            hud_x=result.hud_x,
+            hud_y=result.hud_y,
+            hud_width=result.hud_width,
+            hud_height=result.hud_height,
+            reference_source_video_id=int(source.id),
+            reference_seconds=(candidate.start_seconds + candidate.end_seconds) / 2,
+        )
+        self.repos.activity.add(
+            f"Gemini framing profile proposal ready · {source.title} · {result.reason}",
+            "success",
+        )
+        return proposal
+
+    def render_framing_profile_preview(self, profile: FramingProfile) -> str:
+        """Render a short, low-resolution local sample for the setup workspace."""
+        source, candidate = self._profile_source_and_candidate(profile)
+        proposal = self._candidate_with_profile(candidate, profile, force=True)
+        preview_settings = replace(
+            self._clip_settings_for(source),
+            render_width=360,
+            render_height=640,
+            captions_enabled=False,
+            audio_normalization=False,
+        )
+        rendered = self.renderer.render(
+            source,
+            proposal,
+            preview_settings,
+            output_override=str(self.paths.candidates),
+        )
+        self._validate_regenerated_clip(rendered.file_path, proposal, preview_settings)
+        return rendered.file_path
+
+    def _profile_source_and_candidate(
+        self, profile: FramingProfile
+    ) -> tuple[SourceVideo, ClipCandidate]:
+        if profile.reference_source_video_id is None:
+            raise ValueError("Open Framing Setup from a reviewed clip with a downloaded source video.")
+        source = self._require_video(profile.reference_source_video_id)
+        if not source.local_path or not Path(source.local_path).is_file():
+            raise FileNotFoundError("The reference source video is no longer available locally.")
+        duration = float(source.duration_seconds or probe_media(source.local_path).duration)
+        candidates = self.repos.candidates.list_for_video(int(source.id))
+        reference = max(0.0, min(duration, float(profile.reference_seconds or 0)))
+        if candidates:
+            nearest = min(
+                candidates,
+                key=lambda item: abs((item.render_start + item.render_end) / 2 - reference),
+            )
+            start = max(0.0, reference - 4.0)
+            end = min(duration, reference + 4.0)
+            if end - start < 2:
+                start = max(0.0, end - 2.0)
+            return source, replace(
+                nearest,
+                start_seconds=start,
+                end_seconds=end,
+                refined_start_seconds=start,
+                refined_end_seconds=end,
+                reframe_mode=profile.mode,
+            )
+        start = max(0.0, reference - 4.0)
+        end = min(duration, max(start + 2.0, reference + 4.0))
+        return source, ClipCandidate(
+            0,
+            int(source.id),
+            start,
+            end,
+            0,
+            {},
+            refined_start_seconds=start,
+            refined_end_seconds=end,
+            reframe_mode=profile.mode,
+        )
+
+    def _apply_saved_framing_profile(
+        self,
+        source: SourceVideo,
+        candidate: ClipCandidate,
+        *,
+        profile_matches: bool,
+    ) -> ClipCandidate:
+        profile = self.repos.framing_profiles.get(source.channel_id, candidate.reframe_mode)
+        if not profile or not profile_matches:
+            return candidate
+        return self._candidate_with_profile(candidate, profile)
+
+    @staticmethod
+    def _candidate_with_profile(
+        candidate: ClipCandidate,
+        profile: FramingProfile,
+        *,
+        force: bool = False,
+    ) -> ClipCandidate:
+        if profile.mode == "gaming_split":
+            changes = {
+                field: getattr(profile, field)
+                if getattr(profile, field) is not None
+                else getattr(candidate, field)
+                for field in (
+                    "facecam_x", "facecam_y", "facecam_width", "facecam_height",
+                    "gameplay_x", "gameplay_y", "gameplay_width", "gameplay_height",
+                    "hud_x", "hud_y", "hud_width", "hud_height",
+                )
+            }
+            return replace(candidate, reframe_mode=profile.mode, **changes)
+        if force and profile.mode == "focus":
+            gameplay = (
+                profile.gameplay_x,
+                profile.gameplay_y,
+                profile.gameplay_width,
+                profile.gameplay_height,
+            )
+            if all(value is not None for value in gameplay):
+                x, y, width, height = (float(value) for value in gameplay)
+                return replace(
+                    candidate,
+                    reframe_mode="focus",
+                    focus_x=x + width / 2,
+                    focus_y=y + height / 2,
+                )
+        return candidate
+
+    def _framing_guidance(self, channel_id: int, mode: str | None = None) -> str:
+        profiles = self.repos.framing_profiles.list_for_channel(channel_id)
+        if mode:
+            profiles = [item for item in profiles if item.mode == mode]
+        return "\n\n".join(self._profile_guidance(item) for item in profiles)
+
+    @staticmethod
+    def _profile_guidance(profile: FramingProfile) -> str:
+        labels = {"gaming_split": "Facecam + gameplay", "focus": "Important subject"}
+        lines = [f"Saved {labels.get(profile.mode, profile.mode)} profile:"]
+        for label, prefix in (
+            ("facecam", "facecam"),
+            ("main content/gameplay", "gameplay"),
+            ("HUD/stats", "hud"),
+        ):
+            values = tuple(getattr(profile, f"{prefix}_{part}") for part in ("x", "y", "width", "height"))
+            if all(value is not None for value in values):
+                x, y, width, height = (round(float(value) * 1000) for value in values)
+                lines.append(f"- {label}: x={x}, y={y}, width={width}, height={height}")
+        if profile.instructions:
+            lines.append(f"User instructions: {profile.instructions}")
+        if profile.mode == "focus":
+            lines.append(
+                "The important subject remains dynamic per clip; use these regions only as context and choose "
+                "focus_x/focus_y from the current scene."
+            )
+        else:
+            lines.append("Use saved rectangles when profile_matches is true.")
+        return "\n".join(lines)
 
     @staticmethod
     def _validate_regenerated_clip(

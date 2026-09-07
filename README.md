@@ -13,7 +13,7 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Establish a safe baseline when a channel is first added so old uploads are not analyzed without limit.
 - Check a bounded recent-upload window, hold detected videos at 0% for explicit approval, and process approved jobs sequentially.
 - Manually analyze the latest upload or a specific video.
-- Browse each configured channel's recent uploads in a compact three-column Dashboard without downloading them; feed metadata supplies accurate relative times for the first 24 hours and dates afterward.
+- Browse each configured channel's recent uploads in a compact YouTube-style three-column Dashboard without downloading them; public view counts appear beside relative times for the first 24 hours and dates afterward.
 - Download source media first, retry a rejected HLS stream once through a direct format, then fetch at most one available English VTT caption track as an optional best-effort enhancement.
 - Preselect candidate ranges locally using audio energy, transcript reactions, scene changes, and YouTube heatmap data when available.
 - Send only compressed candidate previews to the selected Gemini model.
@@ -21,6 +21,8 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Apply hard daily limits for videos, source minutes, clips, and estimated AI cost.
 - De-duplicate overlapping moments and render only the best candidates.
 - Ask Gemini to locate facecam, gameplay, and relevant HUD/stat regions, keep a stable 29/71 context-to-gameplay layout, and verify one draft render before it reaches Review.
+- Open a full-size Framing Setup from Review or a channel's Manage menu, draw reusable Facecam, main-content, and HUD regions, add per-channel Gemini instructions, auto-detect a proposal, and render a short local test.
+- Persist separate Facecam + gameplay and Important subject profiles per channel. Saved split layouts remain stable while Important subject still follows each clip's current action.
 - Regenerate framing by having Gemini compare the exact original segment with the current vertical render, for Important subject, Facecam + gameplay, and every selectable framing mode.
 - Render 9:16 H.264 MP4 with scene-aware reframing and loudness normalization. Burned captions are disabled by default.
 - Generate a relevant YouTube title, description, and tags for every newly analyzed candidate, with an optional per-video genre hint for manual analyses.
@@ -32,8 +34,8 @@ Publishing remains approval-driven: nothing is uploaded until a user confirms th
 - Edit Gemini metadata, upload immediately, or choose a scheduled public release from the review flow.
 - Persist upload progress, safely recover interrupted uploads, and track results in a compact publishing queue.
 - Recover interrupted jobs safely after an application restart.
-- Start or stop individual analysis tasks from Monitoring, with a live active-job label and persistent 0–100% progress.
-- Process analysis jobs in one deterministic sequential queue and remove partial renders when a job is cancelled or fails.
+- Start or stop individual items under Current Tasks, with a live active-task label and persistent 0–100% progress.
+- Process analyses in one deterministic sequential queue; stopping removes only the incomplete render and keeps every clip that already finished.
 - Inspect up to 200 chronological, attempt-grouped activity events in one selectable and copyable log view.
 - Build and smoke-test a bundled Windows EXE through GitHub Actions.
 

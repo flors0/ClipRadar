@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 import uuid
@@ -12,7 +13,7 @@ if sys.platform != "win32":
 
 from PySide6.QtWidgets import QApplication
 
-from clipradar.app.paths import AppPaths, resource_path
+from clipradar.app.paths import AppPaths, bundled_binary, resource_path
 from clipradar.app.services import AppServices
 from clipradar.models import (
     Channel,
@@ -45,25 +46,41 @@ def main() -> int:
             last_checked_at="2026-09-04T14:30:00+00:00", last_video_id="demo",
         ))
         channel = services.repositories.channels.list_all()[0]
+        demo_source = Path(temporary) / "demo-source.mp4"
+        subprocess.run(
+            [
+                bundled_binary("ffmpeg"), "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i",
+                "testsrc2=size=960x540:rate=12:duration=8",
+                "-vf",
+                "drawbox=x=25:y=25:w=190:h=145:color=0x334b57:t=fill,"
+                "drawbox=x=740:y=35:w=175:h=120:color=0x554526:t=fill",
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                str(demo_source),
+            ],
+            check=True,
+        )
         source, _ = services.repositories.videos.upsert(SourceVideo(
             None,
             int(channel.id),
             "demo-video",
             "The Minecraft Save Nobody Expected",
             "https://youtube.com/watch?v=demo",
+            duration_seconds=8,
+            local_path=str(demo_source),
         ))
         candidates = services.repositories.candidates.replace_for_video(int(source.id), [
             ClipCandidate(
                 None,
                 int(source.id),
-                125,
-                160,
+                0,
+                8,
                 93,
                 {},
                 ai_score=93,
                 ai_reason="Strong reaction with a clear, self-contained payoff.",
-                refined_start_seconds=127,
-                refined_end_seconds=158,
+                refined_start_seconds=1,
+                refined_end_seconds=7,
                 ai_title="He Somehow Survived This Minecraft Fall",
                 ai_description=(
                     "A split-second Minecraft decision turns into an unbelievable save — and the reaction says everything.\n\n"
@@ -81,8 +98,8 @@ def main() -> int:
             ClipCandidate(
                 None,
                 int(source.id),
-                220,
-                250,
+                0,
+                8,
                 86,
                 {},
                 ai_score=86,
@@ -95,15 +112,15 @@ def main() -> int:
         ])
         clip_path = Path(temporary) / "demo-clip.mp4"
         clip_path.write_bytes(b"preview-placeholder")
-        services.repositories.clips.add(RenderedClip(
+        review_clip = services.repositories.clips.add(RenderedClip(
             None,
             int(candidates[0].id),
             int(source.id),
             str(clip_path),
-            91,
+            8,
             "Vertical 9:16",
-            buffer_start_seconds=97,
-            buffer_end_seconds=188,
+            buffer_start_seconds=0,
+            buffer_end_seconds=8,
         ))
         queued_clip = services.repositories.clips.add(RenderedClip(
             None,
@@ -158,6 +175,7 @@ def main() -> int:
                 "https://youtube.com/watch?v=demo",
                 channel.channel_id,
                 published_at="2026-09-06T13:20:00+00:00",
+                view_count=182_400,
             ),
             RemoteVideo(
                 "demo-video-2",
@@ -165,6 +183,7 @@ def main() -> int:
                 "https://youtube.com/watch?v=demo2",
                 channel.channel_id,
                 published_at="2026-09-05T18:10:00+00:00",
+                view_count=96_200,
             ),
             RemoteVideo(
                 "demo-video-3",
@@ -172,6 +191,7 @@ def main() -> int:
                 "https://youtube.com/watch?v=demo3",
                 channel.channel_id,
                 published_at="2026-09-03T11:00:00+00:00",
+                view_count=51_800,
             ),
         ])
         window.resize(1440, 900)
@@ -185,6 +205,10 @@ def main() -> int:
         window._set_page(3)
         app.processEvents()
         window.grab().save(str(args.output.with_stem(f"{args.output.stem}-review")))
+        window._open_clip_framing(int(review_clip.id))
+        app.processEvents()
+        window.grab().save(str(args.output.with_stem(f"{args.output.stem}-framing")))
+        window._close_framing_setup()
         publish_dialog = PublishDialog(window.review.current, services.publishing, window)
         publish_dialog.show()
         app.processEvents()

@@ -35,32 +35,30 @@ class VideoCard(QFrame):
     def __init__(self, video: RemoteVideo, parent: QWidget | None = None):
         super().__init__(parent)
         self.video = video
-        self.setObjectName("VideoCard")
+        self.setObjectName("VideoTile")
         self.setMinimumWidth(240)
-        self.setMaximumWidth(370)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._menu)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 13)
-        layout.setSpacing(9)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(7)
         self.thumbnail = ThumbnailLabel("Loading thumbnail…")
         self.thumbnail.setObjectName("VideoThumbnail")
         self.thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumbnail.setMinimumHeight(135)
-        self.thumbnail.setMaximumHeight(208)
         self.thumbnail.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.thumbnail)
         self.title = QLabel(video.title)
         self.title.setObjectName("VideoCardTitle")
         self.title.setWordWrap(True)
-        self.title.setMaximumHeight(44)
+        self.title.setFixedHeight(self.title.fontMetrics().lineSpacing() * 2 + 4)
         self.title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         layout.addWidget(self.title)
-        uploaded = muted_label(_relative_upload_time(video.published_at))
-        uploaded.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        layout.addWidget(uploaded)
+        metadata = muted_label(_video_metadata(video))
+        metadata.setObjectName("VideoMetadata")
+        metadata.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        layout.addWidget(metadata)
         if not video.thumbnail_url:
             self.thumbnail.setText("No thumbnail")
 
@@ -70,6 +68,10 @@ class VideoCard(QFrame):
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        self.thumbnail.setFixedHeight(max(120, round(event.size().width() * 9 / 16)))
+        super().resizeEvent(event)
 
     def _menu(self, point) -> None:
         menu = QMenu(self)
@@ -92,13 +94,13 @@ class ThumbnailLabel(QLabel):
     def __init__(self, text: str, parent: QWidget | None = None):
         super().__init__(text, parent)
         self._source_pixmap: QPixmap | None = None
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
 
     def hasHeightForWidth(self) -> bool:
         return True
 
     def heightForWidth(self, width: int) -> int:
-        return max(135, min(208, round(width * 9 / 16)))
+        return max(120, round(width * 9 / 16))
 
     def sizeHint(self) -> QSize:
         return QSize(320, 180)
@@ -178,14 +180,16 @@ class VideoDashboardPage(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.container = QWidget()
+        self.container.setMaximumWidth(1240)
         self.grid = QGridLayout(self.container)
-        self.grid.setContentsMargins(0, 0, 4, 0)
-        self.grid.setHorizontalSpacing(14)
-        self.grid.setVerticalSpacing(14)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setHorizontalSpacing(16)
+        self.grid.setVerticalSpacing(26)
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         for column in range(3):
             self.grid.setColumnStretch(column, 1)
         self.scroll.setWidget(self.container)
+        self.scroll.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
         root.addWidget(self.scroll, 1)
         self.refresh_channels()
 
@@ -335,3 +339,20 @@ def _relative_upload_time(value: str | None) -> str:
         hours = seconds // 3600
         return f"{hours} hour{'s' if hours != 1 else ''} ago"
     return published.astimezone().strftime("%d.%m.%Y")
+
+
+def _video_metadata(video: RemoteVideo) -> str:
+    uploaded = _relative_upload_time(video.published_at)
+    if video.view_count is None:
+        return uploaded
+    return f"{_format_views(video.view_count)} views · {uploaded}"
+
+
+def _format_views(value: int) -> str:
+    if value >= 1_000_000_000:
+        return f"{value / 1_000_000_000:.1f}".rstrip("0").rstrip(".") + "B"
+    if value >= 1_000_000:
+        return f"{value / 1_000_000:.1f}".rstrip("0").rstrip(".") + "M"
+    if value >= 1_000:
+        return f"{value / 1_000:.1f}".rstrip("0").rstrip(".") + "K"
+    return str(value)

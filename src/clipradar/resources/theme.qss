@@ -32,26 +32,18 @@ QFrame#ChannelCard, QFrame#ReviewCard {
     border: 1px solid #242b27;
     border-radius: 12px;
 }
-QFrame#VideoCard {
-    background: #0d1110;
-    border: 1px solid #242b27;
-    border-radius: 12px;
-}
-QFrame#VideoCard:hover { border-color: #56633b; background: #101512; }
+QFrame#VideoTile { background: transparent; border: none; }
 QLabel#VideoThumbnail {
     background: #080a09;
     border: none;
-    border-bottom: 1px solid #202722;
-    border-top-left-radius: 11px;
-    border-top-right-radius: 11px;
+    border-radius: 9px;
     color: #7f8b84;
 }
 QLabel#VideoCardTitle {
     border: none;
-    padding: 0 13px;
     font-weight: 650;
 }
-QFrame#VideoCard QLabel#Muted { border: none; padding: 0 13px; }
+QFrame#VideoTile QLabel#Muted, QLabel#VideoMetadata { border: none; padding: 0; }
 QPushButton {
     min-height: 38px;
     padding: 0 16px;
@@ -127,3 +119,25 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QProgressBar { height: 5px; border: none; border-radius: 2px; background: #242a27; text-align: center; color: transparent; }
 QProgressBar::chunk { background: #caff00; border-radius: 2px; }
 QToolTip { color: #ffffff; background: #171c19; border: 1px solid #343d37; padding: 6px; }
+QTabWidget#FramingTabs::pane {
+    border: none;
+    border-top: 1px solid #242b27;
+    background: transparent;
+}
+QTabWidget#FramingTabs QTabBar::tab {
+    color: #8e9993;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: 10px 18px;
+    margin-right: 4px;
+}
+QTabWidget#FramingTabs QTabBar::tab:selected {
+    color: #ffffff;
+    border-bottom-color: #caff00;
+}
+QWidget#RegionCanvas, QWidget#FramingPreview {
+    background: #050706;
+    border: 1px solid #242b27;
+    border-radius: 9px;
+}

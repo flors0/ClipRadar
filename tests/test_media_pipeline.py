@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from clipradar.models import (
     Channel,
     ClipCandidate,
     ClipStatus,
+    FramingProfile,
     OperationCancelled,
     SourceVideo,
     utc_now,
@@ -100,6 +102,37 @@ class FakeFramingGemini:
             input_tokens=80,
             output_tokens=20,
             estimated_cost_eur=0.0002,
+        )
+
+
+class FakeProfileGemini:
+    def __init__(self):
+        self.call = None
+
+    def analyze_framing(self, **kwargs):
+        self.call = kwargs
+        assert kwargs["current_preview_path"] is None
+        assert Path(kwargs["original_preview_path"]).is_file()
+        return FramingResult(
+            reason="Stable facecam, gameplay, and stats regions detected.",
+            reframe_mode="gaming_split",
+            focus_x=0.55,
+            focus_y=0.52,
+            facecam_x=0.04,
+            facecam_y=0.06,
+            facecam_width=0.20,
+            facecam_height=0.25,
+            gameplay_x=0.0,
+            gameplay_y=0.0,
+            gameplay_width=1.0,
+            gameplay_height=1.0,
+            hud_x=0.78,
+            hud_y=0.08,
+            hud_width=0.18,
+            hud_height=0.22,
+            input_tokens=40,
+            output_tokens=15,
+            estimated_cost_eur=0.0001,
         )
 
 
@@ -217,6 +250,86 @@ def test_gaming_split_keeps_fixed_proportions_and_adjacent_hud(services, synthet
     face_crop = plan.value.split("[face_source]crop=", 1)[1].split(",scale", 1)[0]
     face_width = int(face_crop.split(":")[0])
     assert face_width > 500
+
+
+def test_saved_channel_profile_overrides_matching_gaming_layout_but_not_dynamic_focus(services):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_LAYOUT", "Layout", "", "https://youtube.test/layout"
+    ))
+    gaming = services.repositories.framing_profiles.save(FramingProfile(
+        None,
+        int(channel.id),
+        "gaming_split",
+        facecam_x=0.05,
+        facecam_y=0.07,
+        facecam_width=0.18,
+        facecam_height=0.22,
+        gameplay_x=0.10,
+        gameplay_y=0.0,
+        gameplay_width=0.80,
+        gameplay_height=1.0,
+    ))
+    source = SourceVideo(None, int(channel.id), "layout", "Layout", "https://youtube.test/layout")
+    candidate = ClipCandidate(
+        7, int(channel.id), 0, 8, 80, {}, reframe_mode="gaming_split",
+        facecam_x=0.7, facecam_y=0.7, facecam_width=0.1, facecam_height=0.1,
+    )
+
+    applied = services.pipeline._apply_saved_framing_profile(
+        source, candidate, profile_matches=True
+    )
+    moved_layout = services.pipeline._apply_saved_framing_profile(
+        source, candidate, profile_matches=False
+    )
+    dynamic = services.pipeline._candidate_with_profile(
+        replace(candidate, reframe_mode="focus", focus_x=0.81),
+        replace(gaming, mode="focus"),
+    )
+
+    assert applied.facecam_x == 0.05
+    assert applied.gameplay_width == 0.80
+    assert moved_layout.facecam_x == 0.7
+    assert dynamic.focus_x == 0.81
+
+
+def test_framing_setup_can_auto_detect_and_render_local_preview(
+    services,
+    synthetic_video: Path,
+):
+    channel = services.repositories.channels.add(Channel(
+        None, "UC_PROFILE_PREVIEW", "Profile Preview", "", "https://youtube.test/profile-preview"
+    ))
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "profile-preview",
+        "Profile Preview Source",
+        "https://youtube.test/watch?v=profile-preview",
+        duration_seconds=18,
+        local_path=str(synthetic_video),
+    ))
+    services.repositories.candidates.replace_for_video(int(source.id), [
+        ClipCandidate(None, int(source.id), 4, 12, 80, {}, reframe_mode="gaming_split")
+    ])
+    fake = FakeProfileGemini()
+    services.pipeline.gemini = fake
+    profile = FramingProfile(
+        None,
+        int(channel.id),
+        "gaming_split",
+        instructions="Keep the nearby stats visible.",
+        reference_source_video_id=int(source.id),
+        reference_seconds=8,
+    )
+
+    proposal = services.pipeline.detect_framing_profile(profile)
+    rendered_path = services.pipeline.render_framing_profile_preview(proposal)
+    info = probe_media(rendered_path)
+
+    assert proposal.facecam_x == 0.04
+    assert "stats visible" in fake.call["framing_guidance"]
+    assert (info.width, info.height) == (360, 640)
+    assert 7.5 <= info.duration <= 8.5
 
 
 def test_complete_local_pipeline_reaches_review_queue(services, synthetic_video: Path, transcript_file: Path):
@@ -344,6 +457,74 @@ def test_renderer_honours_cancellation_before_writing_output(
         )
 
     assert not list(services.paths.output.rglob("*.mp4"))
+
+
+def test_stopping_pipeline_keeps_completed_clips(
+    services,
+    synthetic_video: Path,
+    transcript_file: Path,
+):
+    services.settings.save_clips(ClipSettings(
+        minimum_duration=5,
+        target_duration=8,
+        maximum_duration=12,
+        max_clips_per_video=2,
+        max_candidates_per_video=3,
+        render_width=360,
+        render_height=640,
+        captions_enabled=False,
+    ))
+    services.settings.save_ai(AISettings(model="fake-gemini", minimum_ai_score=60))
+    services.pipeline.gemini = FakeGemini()
+    channel = services.repositories.channels.add(Channel(
+        None,
+        "UC_STOP_KEEP",
+        "Stop Keep Channel",
+        "",
+        "https://youtube.test/stop-keep",
+        max_clips_per_video=2,
+        min_duration_seconds=5,
+        target_duration_seconds=8,
+        max_duration_seconds=12,
+    ))
+    source, _ = services.repositories.videos.upsert(SourceVideo(
+        None,
+        int(channel.id),
+        "stop-keep-video",
+        "Stop after one completed clip",
+        "https://youtube.test/watch?v=stop-keep",
+        duration_seconds=18,
+        local_path=str(synthetic_video),
+        transcript_path=str(transcript_file),
+    ))
+    job = services.repositories.jobs.create(int(source.id), utc_now(), manual=True)
+    real_renderer = services.pipeline.renderer
+
+    class StopAfterFirstRenderer:
+        def __init__(self):
+            self.calls = 0
+
+        def render_review_buffer(self, *args, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                services.repositories.jobs.request_cancel(job.id)
+                raise OperationCancelled("Stopped in regression test")
+            return real_renderer.render_review_buffer(*args, **kwargs)
+
+    services.pipeline.renderer = StopAfterFirstRenderer()
+
+    with pytest.raises(OperationCancelled):
+        services.pipeline.run(job.id)
+
+    stopped = services.repositories.jobs.get(job.id)
+    queue = services.repositories.clips.list_review()
+    assert stopped.status.value == "Cancelled"
+    assert stopped.stage == "Stopped · 1 completed clip kept"
+    assert stopped.error is None
+    assert len(queue) == 1
+    assert Path(queue[0]["file_path"]).is_file()
+    messages = [item["message"] for item in services.repositories.activity.recent(100)]
+    assert "Stopped by user · 1 completed clip kept" in messages
 
 
 def test_valid_zero_clip_result_explains_why_nothing_reached_review(

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Iterator
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 SCHEMA = """
@@ -46,6 +46,29 @@ CREATE TABLE IF NOT EXISTS source_videos (
     transcript_path TEXT,
     category_id TEXT,
     discovered_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS framing_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    mode TEXT NOT NULL,
+    instructions TEXT NOT NULL DEFAULT '',
+    facecam_x REAL,
+    facecam_y REAL,
+    facecam_width REAL,
+    facecam_height REAL,
+    gameplay_x REAL,
+    gameplay_y REAL,
+    gameplay_width REAL,
+    gameplay_height REAL,
+    hud_x REAL,
+    hud_y REAL,
+    hud_width REAL,
+    hud_height REAL,
+    reference_source_video_id INTEGER REFERENCES source_videos(id) ON DELETE SET NULL,
+    reference_seconds REAL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(channel_id, mode)
 );
 
 CREATE TABLE IF NOT EXISTS analysis_jobs (
@@ -286,6 +309,22 @@ class Database:
                        )
                        WHERE trim_origin_seconds IS NULL"""
                 )
+        if version < 6:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS framing_profiles (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+                       mode TEXT NOT NULL,
+                       instructions TEXT NOT NULL DEFAULT '',
+                       facecam_x REAL, facecam_y REAL, facecam_width REAL, facecam_height REAL,
+                       gameplay_x REAL, gameplay_y REAL, gameplay_width REAL, gameplay_height REAL,
+                       hud_x REAL, hud_y REAL, hud_width REAL, hud_height REAL,
+                       reference_source_video_id INTEGER REFERENCES source_videos(id) ON DELETE SET NULL,
+                       reference_seconds REAL,
+                       updated_at TEXT NOT NULL,
+                       UNIQUE(channel_id, mode)
+                   )"""
+            )
         connection.execute("UPDATE schema_info SET version = ?", (SCHEMA_VERSION,))
 
     @contextmanager

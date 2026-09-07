@@ -118,11 +118,11 @@ class ChannelService:
             raise ValueError("This analysis task is no longer running or queued.")
         refreshed = self.repos.jobs.get(job_id)
         message = (
-            f"Analysis cancelled · {source.title if source else job_id}"
+            f"Stopped by user · {source.title if source else job_id}"
             if refreshed and refreshed.status.value == "Cancelled"
             else f"Stop requested · {source.title if source else job_id}"
         )
-        self.repos.activity.add(message, "warning", job_id)
+        self.repos.activity.add(message, "info", job_id)
 
     def scan_all(self) -> ScanResult:
         config = self.settings.monitoring()
